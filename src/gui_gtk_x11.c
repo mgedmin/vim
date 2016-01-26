@@ -19,6 +19,10 @@
  *
  * (C) 2002,2003  Jason Hildebrand  <jason@peaceworks.ca>
  *		  Daniel Elstner  <daniel.elstner@gmx.net>
+ *
+ * Support for GTK+ 3 was added by:
+ *
+ * 2016  Kazunobu Kuriyama  <kazunobu.kuriyama@gmail.com>
  */
 
 #include "vim.h"
@@ -75,7 +79,12 @@ extern void bonobo_dock_item_set_behavior(BonoboDockItem *dock_item, BonoboDockI
 # define GdkEventConfigure int
 # define GdkEventClient int
 #else
-# include <gdk/gdkkeysyms.h>
+# ifdef USE_GTK3
+#  include <gdk/gdkkeysyms-compat.h>
+#  include <gtk/gtkx.h>
+# else
+#  include <gdk/gdkkeysyms.h>
+# endif
 # include <gdk/gdk.h>
 # ifdef WIN3264
 #  include <gdk/gdkwin32.h>
@@ -580,6 +589,7 @@ gui_mch_free_all()
 }
 #endif
 
+#ifndef GDK_DISABLE_DEPRECATED
 /*
  * This should be maybe completely removed.
  * Doesn't seem possible, since check_copy_area() relies on
@@ -601,10 +611,31 @@ visibility_event(GtkWidget *widget UNUSED,
 			     gui.visibility != GDK_VISIBILITY_UNOBSCURED);
     return FALSE;
 }
+#endif
 
 /*
  * Redraw the corresponding portions of the screen.
  */
+#ifdef USE_GTK3
+    static gboolean
+draw_event(GtkWidget*widget UNUSED,
+           cairo_t *cr,
+           gpointer user_data UNUSED)
+{
+    GdkRectangle clip_rect;
+
+    /* Skip this when the GUI isn't set up yet, will redraw later. */
+    if (gui.starting)
+	return FALSE;
+
+    out_flush();		/* make sure all output has been processed */
+
+    if (gdk_cairo_get_clip_rectangle(cr, &clip_rect))
+        gui_redraw(clip_rect.x, clip_rect.y, clip_rect.width, clip_rect.height);
+
+    return FALSE;
+}
+#else
     static gint
 expose_event(GtkWidget *widget UNUSED,
 	     GdkEventExpose *event,
@@ -620,17 +651,36 @@ expose_event(GtkWidget *widget UNUSED,
 
     /* Clear the border areas if needed */
     if (event->area.x < FILL_X(0))
+#ifdef GSEAL_ENABLE
+	gdk_window_clear_area(gtk_widget_get_window(gui.drawarea), 0, 0, FILL_X(0), 0);
+#else
 	gdk_window_clear_area(gui.drawarea->window, 0, 0, FILL_X(0), 0);
+#endif
     if (event->area.y < FILL_Y(0))
+#ifdef GSEAL_ENABLE
+	gdk_window_clear_area(gtk_widget_get_window(gui.drawarea), 0, 0, 0, FILL_Y(0));
+#else
 	gdk_window_clear_area(gui.drawarea->window, 0, 0, 0, FILL_Y(0));
+#endif
     if (event->area.x > FILL_X(Columns))
+#ifdef GSEAL_ENABLE
+	gdk_window_clear_area(gtk_widget_get_window(gui.drawarea),
+			      FILL_X((int)Columns), 0, 0, 0);
+#else
 	gdk_window_clear_area(gui.drawarea->window,
 			      FILL_X((int)Columns), 0, 0, 0);
+#endif
     if (event->area.y > FILL_Y(Rows))
+#ifdef GSEAL_ENABLE
+	gdk_window_clear_area(gtk_widget_get_window(gui.drawarea),
+                              0, FILL_Y((int)Rows), 0, 0);
+#else
 	gdk_window_clear_area(gui.drawarea->window, 0, FILL_Y((int)Rows), 0, 0);
+#endif
 
     return FALSE;
 }
+#endif
 
 #ifdef FEAT_CLIENTSERVER
 /*
@@ -643,7 +693,11 @@ property_event(GtkWidget *widget,
 {
     if (event->type == GDK_PROPERTY_NOTIFY
 	    && event->state == (int)GDK_PROPERTY_NEW_VALUE
+#ifdef USE_GTK3
+            && GDK_WINDOW_XID(event->window) == commWindow
+#else
 	    && GDK_WINDOW_XWINDOW(event->window) == commWindow
+#endif
 	    && GET_X_ATOM(event->atom) == commProperty)
     {
 	XEvent xev;
@@ -653,7 +707,11 @@ property_event(GtkWidget *widget,
 	xev.xproperty.atom = commProperty;
 	xev.xproperty.window = commWindow;
 	xev.xproperty.state = PropertyNewValue;
+#ifdef GSEAL_ENABLE
+	serverEventProc(GDK_WINDOW_XDISPLAY(gtk_widget_get_window(widget)), &xev, 0);
+#else
 	serverEventProc(GDK_WINDOW_XDISPLAY(widget->window), &xev, 0);
+#endif
     }
     return FALSE;
 }
@@ -698,7 +756,11 @@ gui_mch_stop_blink(void)
 {
     if (blink_timer)
     {
+#ifdef GTK_DISABLE_DEPRECATED
+        g_source_remove(blink_timer);
+#else
 	gtk_timeout_remove(blink_timer);
+#endif
 	blink_timer = 0;
     }
     if (blink_state == BLINK_OFF)
@@ -706,22 +768,36 @@ gui_mch_stop_blink(void)
     blink_state = BLINK_NONE;
 }
 
+#ifdef GTK_DISABLE_DEPRECATED
+    static gboolean
+#else
     static gint
+#endif
 blink_cb(gpointer data UNUSED)
 {
     if (blink_state == BLINK_ON)
     {
 	gui_undraw_cursor();
 	blink_state = BLINK_OFF;
+#ifdef GTK_DISABLE_DEPRECATED
+	blink_timer = g_timeout_add((guint)blink_offtime,
+                                   (GSourceFunc) blink_cb, NULL);
+#else
 	blink_timer = gtk_timeout_add((guint32)blink_offtime,
 				   (GtkFunction) blink_cb, NULL);
+#endif
     }
     else
     {
 	gui_update_cursor(TRUE, FALSE);
 	blink_state = BLINK_ON;
+#ifdef GTK_DISABLE_DEPRECATED
+	blink_timer = g_timeout_add((guint)blink_ontime,
+                                   (GSourceFunc) blink_cb, NULL);
+#else
 	blink_timer = gtk_timeout_add((guint32)blink_ontime,
 				   (GtkFunction) blink_cb, NULL);
+#endif
     }
 
     return FALSE;		/* don't happen again */
@@ -736,14 +812,23 @@ gui_mch_start_blink(void)
 {
     if (blink_timer)
     {
+#ifdef GTK_DISABLE_DEPRECATED
+	g_source_remove(blink_timer);
+#else
 	gtk_timeout_remove(blink_timer);
+#endif
 	blink_timer = 0;
     }
     /* Only switch blinking on if none of the times is zero */
     if (blink_waittime && blink_ontime && blink_offtime && gui.in_focus)
     {
+#ifdef GTK_DISABLE_DEPRECATED
+	blink_timer = g_timeout_add((guint)blink_waittime,
+                                   (GSourceFunc) blink_cb, NULL);
+#else
 	blink_timer = gtk_timeout_add((guint32)blink_waittime,
 				   (GtkFunction) blink_cb, NULL);
+#endif
 	blink_state = BLINK_ON;
 	gui_update_cursor(TRUE, FALSE);
     }
@@ -758,7 +843,11 @@ enter_notify_event(GtkWidget *widget UNUSED,
 	gui_mch_start_blink();
 
     /* make sure keyboard input goes there */
+#ifdef GTK_DISABLE_DEPRECATED
+    if (gtk_socket_id == 0 || !gtk_widget_has_focus(gui.drawarea))
+#else
     if (gtk_socket_id == 0 || !GTK_WIDGET_HAS_FOCUS(gui.drawarea))
+#endif
 	gtk_widget_grab_focus(gui.drawarea);
 
     return FALSE;
@@ -1179,13 +1268,22 @@ selection_received_cb(GtkWidget		*widget UNUSED,
     int		    len;
     int		    motion_type = MAUTO;
 
+#ifdef GSEAL_ENABLE
+    if (gtk_selection_data_get_selection(data) == clip_plus.gtk_sel_atom)
+#else
     if (data->selection == clip_plus.gtk_sel_atom)
+#endif
 	cbd = &clip_plus;
     else
 	cbd = &clip_star;
 
+#ifdef GSEAL_ENABLE
+    text = (char_u *)gtk_selection_data_get_data(data);
+    len = gtk_selection_data_get_length(data);
+#else
     text = (char_u *)data->data;
     len  = data->length;
+#endif
 
     if (text == NULL || len <= 0)
     {
@@ -1195,13 +1293,20 @@ selection_received_cb(GtkWidget		*widget UNUSED,
 	return;
     }
 
+#ifdef GSEAL_ENABLE
+    if (gtk_selection_data_get_data_type(data) == vim_atom)
+#else
     if (data->type == vim_atom)
+#endif
     {
 	motion_type = *text++;
 	--len;
     }
-
+#ifdef GSEAL_ENABLE
+    else if (gtk_selection_data_get_data_type(data) == vimenc_atom)
+#else
     else if (data->type == vimenc_atom)
+#endif
     {
 	char_u		*enc;
 	vimconv_T	conv;
@@ -1292,7 +1397,11 @@ selection_get_cb(GtkWidget	    *widget UNUSED,
     GdkAtom	    type;
     VimClipboard    *cbd;
 
+#ifdef GSEAL_ENABLE
+    if (gtk_selection_data_get_selection(selection_data) == clip_plus.gtk_sel_atom)
+#else
     if (selection_data->selection == clip_plus.gtk_sel_atom)
+#endif
 	cbd = &clip_plus;
     else
 	cbd = &clip_star;
@@ -1361,8 +1470,12 @@ selection_get_cb(GtkWidget	    *widget UNUSED,
 	    string = tmpbuf;
 	    length += 2;
 
+#ifndef GSEAL_ENABLE
+            /* Looks redandunt even for GTK2 because these values are
+             * overwritten by gtk_selection_data_set() that follows. */
 	    selection_data->type = selection_data->target;
 	    selection_data->format = 16;	/* 16 bits per char */
+#endif
 	    gtk_selection_data_set(selection_data, html_atom, 16,
 							      string, length);
 	    vim_free(string);
@@ -1411,9 +1524,12 @@ selection_get_cb(GtkWidget	    *widget UNUSED,
 
     if (string != NULL)
     {
+#ifndef GSEAL_ENABLE
+        /* Looks redandunt even for GTK2 because these values are
+         * overwritten by gtk_selection_data_set() that follows. */
 	selection_data->type = selection_data->target;
 	selection_data->format = 8;	/* 8 bits per char */
-
+#endif
 	gtk_selection_data_set(selection_data, type, 8, string, length);
 	vim_free(string);
     }
@@ -1493,7 +1609,11 @@ static int mouse_timed_out = TRUE;
 /*
  * Timer used to recognize multiple clicks of the mouse button
  */
+#ifdef GTK_DISABLE_DEPRECATED
+    static gboolean
+#else
     static gint
+#endif
 mouse_click_timer_cb(gpointer data)
 {
     /* we don't use this information currently */
@@ -1505,13 +1625,20 @@ mouse_click_timer_cb(gpointer data)
 
 static guint motion_repeat_timer  = 0;
 static int   motion_repeat_offset = FALSE;
+#ifdef GTK_DEST_DEFAULT_ALL
+static gboolean  motion_repeat_timer_cb(gpointer);
+#else
 static gint  motion_repeat_timer_cb(gpointer);
+#endif
 
     static void
 process_motion_notify(int x, int y, GdkModifierType state)
 {
     int	    button;
     int_u   vim_modifiers;
+#ifdef GSEAL_ENABLE
+    GtkAllocation allocation;
+#endif
 
     button = (state & (GDK_BUTTON1_MASK | GDK_BUTTON2_MASK |
 		       GDK_BUTTON3_MASK | GDK_BUTTON4_MASK |
@@ -1538,9 +1665,17 @@ process_motion_notify(int x, int y, GdkModifierType state)
     /*
      * Auto repeat timer handling.
      */
+#ifdef GSEAL_ENABLE
+    gtk_widget_get_allocation(gui.drawarea, &allocation);
+
+    if (x < 0 || y < 0
+	    || x >= allocation.width
+	    || y >= allocation.height)
+#else
     if (x < 0 || y < 0
 	    || x >= gui.drawarea->allocation.width
 	    || y >= gui.drawarea->allocation.height)
+#endif
     {
 
 	int dx;
@@ -1551,8 +1686,13 @@ process_motion_notify(int x, int y, GdkModifierType state)
 	/* Calculate the maximal distance of the cursor from the drawing area.
 	 * (offshoot can't become negative here!).
 	 */
+#ifdef GSEAL_ENABLE
+	dx = x < 0 ? -x : x - allocation.width;
+	dy = y < 0 ? -y : y - allocation.height;
+#else
 	dx = x < 0 ? -x : x - gui.drawarea->allocation.width;
 	dy = y < 0 ? -y : y - gui.drawarea->allocation.height;
+#endif
 
 	offshoot = dx > dy ? dx : dy;
 
@@ -1577,22 +1717,35 @@ process_motion_notify(int x, int y, GdkModifierType state)
 
 	/* shoot again */
 	if (!motion_repeat_timer)
+#ifdef GTK_DISABLE_DEPRECATED
+	    motion_repeat_timer = g_timeout_add((guint)delay,
+						motion_repeat_timer_cb, NULL);
+#else
 	    motion_repeat_timer = gtk_timeout_add((guint32)delay,
 						motion_repeat_timer_cb, NULL);
+#endif
     }
 }
 
 /*
  * Timer used to recognize multiple clicks of the mouse button.
  */
+#ifdef GTK_DISABLE_DEPRECATED
+    static gboolean
+#else
     static gint
+#endif
 motion_repeat_timer_cb(gpointer data UNUSED)
 {
     int		    x;
     int		    y;
     GdkModifierType state;
 
+#ifdef GSEAL_ENABLE
+    gdk_window_get_pointer(gtk_widget_get_window(gui.drawarea), &x, &y, &state);
+#else
     gdk_window_get_pointer(gui.drawarea->window, &x, &y, &state);
+#endif
 
     if (!(state & (GDK_BUTTON1_MASK | GDK_BUTTON2_MASK |
 		   GDK_BUTTON3_MASK | GDK_BUTTON4_MASK |
@@ -1637,7 +1790,11 @@ motion_notify_event(GtkWidget *widget,
 	int		y;
 	GdkModifierType	state;
 
+#ifdef GSEAL_ENABLE
+	gdk_window_get_pointer(gtk_widget_get_window(widget), &x, &y, &state);
+#else
 	gdk_window_get_pointer(widget->window, &x, &y, &state);
+#endif
 	process_motion_notify(x, y, state);
     }
     else
@@ -1668,7 +1825,11 @@ button_press_event(GtkWidget *widget,
     gui.event_time = event->time;
 
     /* Make sure we have focus now we've been selected */
+#ifdef GTK_DISABLE_DEPRECATED
+    if (gtk_socket_id != 0 && !gtk_widget_has_focus(widget))
+#else
     if (gtk_socket_id != 0 && !GTK_WIDGET_HAS_FOCUS(widget))
+#endif
 	gtk_widget_grab_focus(widget);
 
     /*
@@ -1684,14 +1845,23 @@ button_press_event(GtkWidget *widget,
     /* Handle multiple clicks */
     if (!mouse_timed_out && mouse_click_timer)
     {
+#ifdef GTK_DISABLE_DEPRECATED
+	g_source_remove(mouse_click_timer);
+#else
 	gtk_timeout_remove(mouse_click_timer);
+#endif
 	mouse_click_timer = 0;
 	repeated_click = TRUE;
     }
 
     mouse_timed_out = FALSE;
+#ifdef GTK_DISABLE_DEPRECATED
+    mouse_click_timer = g_timeout_add((guint)p_mouset,
+				  mouse_click_timer_cb, &mouse_timed_out);
+#else
     mouse_click_timer = gtk_timeout_add((guint32)p_mouset,
 				  mouse_click_timer_cb, &mouse_timed_out);
+#endif
 
     switch (event->button)
     {
@@ -1730,7 +1900,11 @@ scroll_event(GtkWidget *widget,
     int	    button;
     int_u   vim_modifiers;
 
+#ifdef GTK_DISABLE_DEPRECATED
+    if (gtk_socket_id != 0 && !gtk_widget_has_focus(widget))
+#else
     if (gtk_socket_id != 0 && !GTK_WIDGET_HAS_FOCUS(widget))
+#endif
 	gtk_widget_grab_focus(widget);
 
     switch (event->direction)
@@ -1781,7 +1955,11 @@ button_release_event(GtkWidget *widget UNUSED,
        area .*/
     if (motion_repeat_timer)
     {
+#ifdef GTK_DISABLE_DEPRECATED
+	g_source_remove(motion_repeat_timer);
+#else
 	gtk_timeout_remove(motion_repeat_timer);
+#endif
 	motion_repeat_timer = 0;
     }
 
@@ -1896,7 +2074,13 @@ drag_handle_uri_list(GdkDragContext	*context,
     char_u  **fnames;
     int	    nfiles = 0;
 
+#ifdef GSEAL_ENABLE
+    fnames = parse_uri_list(&nfiles,
+                            (char_u *)gtk_selection_data_get_data(data),
+                            gtk_selection_data_get_length(data));
+#else
     fnames = parse_uri_list(&nfiles, data->data, data->length);
+#endif
 
     if (fnames != NULL && nfiles > 0)
     {
@@ -1923,10 +2107,19 @@ drag_handle_text(GdkDragContext	    *context,
     int	    len;
     char_u  *tmpbuf = NULL;
 
+#ifdef GSEAL_ENABLE
+    text = (char_u *)gtk_selection_data_get_data(data);
+    len = gtk_selection_data_get_length(data);
+#else
     text = data->data;
     len  = data->length;
+#endif
 
+#ifdef GSEAL_ENABLE
+    if (gtk_selection_data_get_data_type(data) == utf8_string_atom)
+#else
     if (data->type == utf8_string_atom)
+#endif
     {
 	if (input_conv.vc_type != CONV_NONE)
 	    tmpbuf = string_convert(&input_conv, text, &len);
@@ -1962,10 +2155,17 @@ drag_data_received_cb(GtkWidget		*widget,
     GdkModifierType state;
 
     /* Guard against trash */
+#ifdef GSEAL_ENABLE
+    if (gtk_selection_data_get_data(data) == NULL
+            || gtk_selection_data_get_length(data) <= 0
+            || gtk_selection_data_get_format(data) != 8
+            || gtk_selection_data_get_data(data)[gtk_selection_data_get_length(data)] != '\0')
+#else
     if (data->data == NULL
 	    || data->length <= 0
 	    || data->format != 8
 	    || data->data[data->length] != '\0')
+#endif
     {
 	gtk_drag_finish(context, FALSE, FALSE, time_);
 	return;
@@ -1973,7 +2173,11 @@ drag_data_received_cb(GtkWidget		*widget,
 
     /* Get the current modifier state for proper distinguishment between
      * different operations later. */
+#ifdef GSEAL_ENABLE
+    gdk_window_get_pointer(gtk_widget_get_window(widget), NULL, NULL, &state);
+#else
     gdk_window_get_pointer(widget->window, NULL, NULL, &state);
+#endif
 
     /* Not sure about the role of "text/plain" here... */
     if (info == (guint)TARGET_TEXT_URI_LIST)
@@ -2271,9 +2475,19 @@ setup_save_yourself(void)
 	/* Fall back to old method */
 
 	/* first get the existing value */
+#if GSEAL_ENABLE
+	if (XGetWMProtocols(GDK_WINDOW_XDISPLAY(gtk_widget_get_window(gui.mainwin)),
+#ifdef USE_GTK3
+                    GDK_WINDOW_XID(gtk_widget_get_window(gui.mainwin)),
+#else
+		    GDK_WINDOW_XWINDOW(gtk_widget_get_window(gui.mainwin)),
+#endif
+		    &existing_atoms, &count))
+#else
 	if (XGetWMProtocols(GDK_WINDOW_XDISPLAY(gui.mainwin->window),
 		    GDK_WINDOW_XWINDOW(gui.mainwin->window),
 		    &existing_atoms, &count))
+#endif
 	{
 	    Atom	*new_atoms;
 	    Atom	save_yourself_xatom;
@@ -2295,9 +2509,19 @@ setup_save_yourself(void)
 		{
 		    memcpy(new_atoms, existing_atoms, count * sizeof(Atom));
 		    new_atoms[count] = save_yourself_xatom;
+#ifdef GSEAL_ENABLE
+		    XSetWMProtocols(GDK_WINDOW_XDISPLAY(gtk_widget_get_window(gui.mainwin)),
+#if USE_GTK3
+			    GDK_WINDOW_XID(gtk_widget_get_window(gui.mainwin)),
+#else
+			    GDK_WINDOW_XWINDOW(gtk_widget_get_window(gui.mainwin)),
+#endif
+			    new_atoms, count + 1);
+#else
 		    XSetWMProtocols(GDK_WINDOW_XDISPLAY(gui.mainwin->window),
 			    GDK_WINDOW_XWINDOW(gui.mainwin->window),
 			    new_atoms, count + 1);
+#endif
 		    vim_free(new_atoms);
 		}
 	    }
@@ -2341,9 +2565,19 @@ global_event_filter(GdkXEvent *xev,
 	 * know we are done saving ourselves.  We don't want to be
 	 * restarted, thus set argv to NULL.
 	 */
+#ifdef GSEAL_ENABLE
+	XSetCommand(GDK_WINDOW_XDISPLAY(gtk_widget_get_window(gui.mainwin)),
+#ifdef USE_GTK3
+		    GDK_WINDOW_XID(gtk_widget_get_window(gui.mainwin)),
+#else
+		    GDK_WINDOW_XWINDOW(gtk_widget_get_window(gui.mainwin)),
+#endif
+		    NULL, 0);
+#else
 	XSetCommand(GDK_WINDOW_XDISPLAY(gui.mainwin->window),
 		    GDK_WINDOW_XWINDOW(gui.mainwin->window),
 		    NULL, 0);
+#endif
 	return GDK_FILTER_REMOVE;
     }
 
@@ -2379,7 +2613,15 @@ mainwin_realize(GtkWidget *widget UNUSED, gpointer data UNUSED)
     /* When started with "--echo-wid" argument, write window ID on stdout. */
     if (echo_wid_arg)
     {
+#ifdef GSEAL_ENABLE
+#ifdef USE_GTK3
+	printf("WID: %ld\n", (long)GDK_WINDOW_XID(gtk_widget_get_window(gui.mainwin)));
+#else
+	printf("WID: %ld\n", (long)GDK_WINDOW_XWINDOW(gtk_widget_get_window(gui.mainwin)));
+#endif
+#else
 	printf("WID: %ld\n", (long)GDK_WINDOW_XWINDOW(gui.mainwin->window));
+#endif
 	fflush(stdout);
     }
 
@@ -2416,10 +2658,21 @@ mainwin_realize(GtkWidget *widget UNUSED, gpointer data UNUSED)
     if (serverName == NULL && serverDelayedStartName != NULL)
     {
 	/* This is a :gui command in a plain vim with no previous server */
+#ifdef GSEAL_ENABLE
+#ifdef USE_GTK3
+	commWindow = GDK_WINDOW_XID(gtk_widget_get_window(gui.mainwin));
+#else
+	commWindow = GDK_WINDOW_XWINDOW(gtk_widget_get_window(gui.mainwin));
+#endif
+
+	(void)serverRegisterName(GDK_WINDOW_XDISPLAY(gtk_widget_get_window(gui.mainwin)),
+				 serverDelayedStartName);
+#else
 	commWindow = GDK_WINDOW_XWINDOW(gui.mainwin->window);
 
 	(void)serverRegisterName(GDK_WINDOW_XDISPLAY(gui.mainwin->window),
 				 serverDelayedStartName);
+#endif
     }
     else
     {
@@ -2428,12 +2681,27 @@ mainwin_realize(GtkWidget *widget UNUSED, gpointer data UNUSED)
 	 * have to change the "server" registration to that of the main window
 	 * If we have not registered a name yet, remember the window
 	 */
+#ifdef GSEAL_ENABLE
+#ifdef USE_GTK3
+	serverChangeRegisteredWindow(GDK_WINDOW_XDISPLAY(gtk_widget_get_window(gui.mainwin)),
+				     GDK_WINDOW_XID(gtk_widget_get_window(gui.mainwin)));
+#else
+	serverChangeRegisteredWindow(GDK_WINDOW_XDISPLAY(gtk_widget_get_window(gui.mainwin)),
+				     GDK_WINDOW_XWINDOW(gtk_widget_get_window(gui.mainwin)));
+#endif
+#else
 	serverChangeRegisteredWindow(GDK_WINDOW_XDISPLAY(gui.mainwin->window),
 				     GDK_WINDOW_XWINDOW(gui.mainwin->window));
+#endif
     }
     gtk_widget_add_events(gui.mainwin, GDK_PROPERTY_CHANGE_MASK);
+#ifdef GTK_DISABLE_DEPRECATED
+    g_signal_connect(G_OBJECT(gui.mainwin), "property-notify-event",
+                     G_CALLBACK(property_event), NULL);
+#else
     gtk_signal_connect(GTK_OBJECT(gui.mainwin), "property_notify_event",
 		       GTK_SIGNAL_FUNC(property_event), NULL);
+#endif
 #endif
 }
 
@@ -2441,10 +2709,16 @@ mainwin_realize(GtkWidget *widget UNUSED, gpointer data UNUSED)
 create_blank_pointer(void)
 {
     GdkWindow	*root_window = NULL;
+#ifdef USE_GTK3
+    GdkPixbuf   *blank_mask;
+#else
     GdkPixmap	*blank_mask;
+#endif
     GdkCursor	*cursor;
     GdkColor	color = { 0, 0, 0, 0 };
+#ifndef GDK_DISABLE_DEPRECATED
     char	blank_data[] = { 0x0 };
+#endif
 
 #ifdef HAVE_GTK_MULTIHEAD
     root_window = gtk_widget_get_root_window(gui.mainwin);
@@ -2452,10 +2726,52 @@ create_blank_pointer(void)
 
     /* Create a pseudo blank pointer, which is in fact one pixel by one pixel
      * in size. */
+#ifdef GDK_DISABLE_DEPRECATED
+    {
+#ifdef USE_GTK3
+        cairo_surface_t *surf;
+        cairo_t         *cr;
+
+        surf = cairo_image_surface_create(CAIRO_FORMAT_A1, 1, 1);
+        cr = cairo_create(surf);
+
+        cairo_set_source_rgb(cr,
+                             color.red / 65535.0,
+                             color.green / 65535.0,
+                             color.blue / 65535.0);
+        cairo_rectangle(cr, 0, 0, 1, 1);
+        cairo_fill(cr);
+        cairo_destroy(cr);
+
+        blank_mask = gdk_pixbuf_get_from_surface(surf, 0, 0, 1, 1);
+        cairo_surface_destroy(surf);
+
+        cursor = gdk_cursor_new_from_pixbuf(gdk_window_get_display(root_window),
+                                            blank_mask, 0, 0);
+        g_object_unref(blank_mask);
+#else
+        cairo_t *cr;
+
+        blank_mask = gdk_pixmap_new(NULL, 1, 1, 1);
+
+        cr = gdk_cairo_create(blank_mask);
+        cairo_rectangle(cr, 0, 0, 1, 1);
+        cairo_fill(cr);
+        cairo_destroy(cr);
+
+        cursor = gdk_cursor_new_from_pixmap(blank_mask, blank_mask,
+                                            &color, &color,
+                                            0, 0);
+
+        g_object_unref(blank_mask);
+#endif
+    }
+#else
     blank_mask = gdk_bitmap_create_from_data(root_window, blank_data, 1, 1);
     cursor = gdk_cursor_new_from_pixmap(blank_mask, blank_mask,
 					&color, &color, 0, 0);
     gdk_bitmap_unref(blank_mask);
+#endif
 
     return cursor;
 }
@@ -2477,8 +2793,13 @@ mainwin_screen_changed_cb(GtkWidget  *widget,
 
     gui.blank_pointer = create_blank_pointer();
 
+#ifdef GSEAL_ENABLE
+    if (gui.pointer_hidden && gtk_widget_get_window(gui.drawarea) != NULL)
+	gdk_window_set_cursor(gtk_widget_get_window(gui.drawarea), gui.blank_pointer);
+#else
     if (gui.pointer_hidden && gui.drawarea->window != NULL)
 	gdk_window_set_cursor(gui.drawarea->window, gui.blank_pointer);
+#endif
 
     /*
      * Create a new PangoContext for this screen, and initialize it
@@ -2509,28 +2830,63 @@ mainwin_screen_changed_cb(GtkWidget  *widget,
 drawarea_realize_cb(GtkWidget *widget, gpointer data UNUSED)
 {
     GtkWidget *sbar;
+#ifdef GSEAL_ENABLE
+    GtkAllocation allocation;
+#endif
 
 #ifdef FEAT_XIM
     xim_init();
 #endif
     gui_mch_new_colors();
+#ifndef GDK_DISABLE_DEPRECATED
     gui.text_gc = gdk_gc_new(gui.drawarea->window);
+#endif
 
     gui.blank_pointer = create_blank_pointer();
     if (gui.pointer_hidden)
+#ifdef GSEAL_ENABLE
+	gdk_window_set_cursor(gtk_widget_get_window(widget), gui.blank_pointer);
+#else
 	gdk_window_set_cursor(widget->window, gui.blank_pointer);
+#endif
 
     /* get the actual size of the scrollbars, if they are realized */
     sbar = firstwin->w_scrollbars[SBAR_LEFT].id;
     if (!sbar || (!gui.which_scrollbars[SBAR_LEFT]
 				    && firstwin->w_scrollbars[SBAR_RIGHT].id))
 	sbar = firstwin->w_scrollbars[SBAR_RIGHT].id;
+#ifdef GTK_DISABLE_DEPRECATED
+#ifdef GSEAL_ENABLE
+    gtk_widget_get_allocation(sbar, &allocation);
+
+    if (sbar && gtk_widget_get_realized(sbar) && allocation.width)
+#else
+    if (sbar && gtk_widget_get_realized(sbar) && sbar->allocation.width)
+#endif
+#else
     if (sbar && GTK_WIDGET_REALIZED(sbar) && sbar->allocation.width)
+#endif
+#ifdef GSEAL_ENABLE
+	gui.scrollbar_width = allocation.width;
+#else
 	gui.scrollbar_width = sbar->allocation.width;
+#endif
 
     sbar = gui.bottom_sbar.id;
+#ifdef GTK_DISABLE_DEPRECATED
+#ifdef GSEAL_ENABLE
+    if (sbar && gtk_widget_get_realized(sbar) && allocation.height)
+#else
+    if (sbar && gtk_widget_get_realized(sbar) && sbar->allocation.height)
+#endif
+#else
     if (sbar && GTK_WIDGET_REALIZED(sbar) && sbar->allocation.height)
+#endif
+#ifdef GSEAL_ENABLE
+	gui.scrollbar_height = allocation.height;
+#else
 	gui.scrollbar_height = sbar->allocation.height;
+#endif
 }
 
 /*
@@ -2558,8 +2914,10 @@ drawarea_unrealize_cb(GtkWidget *widget UNUSED, gpointer data UNUSED)
     g_object_unref(gui.text_context);
     gui.text_context = NULL;
 
+#ifndef GDK_DISABLE_DEPRECATED
     g_object_unref(gui.text_gc);
     gui.text_gc = NULL;
+#endif
 
     gdk_cursor_unref(gui.blank_pointer);
     gui.blank_pointer = NULL;
@@ -2612,15 +2970,33 @@ get_item_dimensions(GtkWidget *widget, GtkOrientation orientation)
 	}
     }
 #endif
+#ifdef GTK_DISABLE_DEPRECATED
+    if (widget != NULL
+	    && item_orientation == orientation
+	    && gtk_widget_get_realized(widget)
+	    && gtk_widget_get_visible(widget))
+#else
     if (widget != NULL
 	    && item_orientation == orientation
 	    && GTK_WIDGET_REALIZED(widget)
 	    && GTK_WIDGET_VISIBLE(widget))
+#endif
     {
+#ifdef GSEAL_ENABLE
+        GtkAllocation allocation;
+
+        gtk_widget_get_allocation(widget, &allocation);
+
+	if (orientation == GTK_ORIENTATION_HORIZONTAL)
+	    return allocation.height;
+	else
+	    return allocation.width;
+#else
 	if (orientation == GTK_ORIENTATION_HORIZONTAL)
 	    return widget->allocation.height;
 	else
 	    return widget->allocation.width;
+#endif
     }
     return 0;
 }
@@ -2815,7 +3191,9 @@ set_toolbar_style(GtkToolbar *toolbar)
 	style = GTK_TOOLBAR_ICONS;
 
     gtk_toolbar_set_style(toolbar, style);
+#ifndef GTK_DISABLE_DEPRECATED
     gtk_toolbar_set_tooltips(toolbar, (toolbar_flags & TOOLBAR_TOOLTIPS) != 0);
+#endif
 
     switch (tbis_flags)
     {
@@ -2847,7 +3225,9 @@ set_toolbar_style(GtkToolbar *toolbar)
 #if defined(FEAT_GUI_TABLINE) || defined(PROTO)
 static int ignore_tabline_evt = FALSE;
 static GtkWidget *tabline_menu;
+#ifndef GTK_DISABLE_DEPRECATED
 static GtkTooltips *tabline_tooltip;
+#endif
 static int clicked_page;	    /* page clicked in tab line */
 
 /*
@@ -2872,9 +3252,15 @@ add_tabline_menu_item(GtkWidget *menu, char_u *text, int resp)
     CONVERT_TO_UTF8_FREE(utf_text);
 
     gtk_container_add(GTK_CONTAINER(menu), item);
+#ifdef GTK_DISABLE_DEPRECATED
+    g_signal_connect(G_OBJECT(item), "activate",
+	    G_CALLBACK(tabline_menu_handler),
+	    GINT_TO_POINTER(resp));
+#else
     gtk_signal_connect(GTK_OBJECT(item), "activate",
 	    GTK_SIGNAL_FUNC(tabline_menu_handler),
 	    (gpointer)(long)resp);
+#endif
 }
 
 /*
@@ -2918,8 +3304,13 @@ on_tabline_menu(GtkWidget *widget, GdkEvent *event)
 
 	tabwin = gdk_window_at_pointer(&x, &y);
 	gdk_window_get_user_data(tabwin, (gpointer)&tabwidget);
+#ifdef GTK_DISABLE_DEPRECATED
+	clicked_page = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(tabwidget),
+                                                         "tab_num"));
+#else
 	clicked_page = (int)(long)gtk_object_get_user_data(
 						       GTK_OBJECT(tabwidget));
+#endif
 
 	/* If the event was generated for 3rd button popup the menu. */
 	if (bevent->button == 3)
@@ -2950,7 +3341,11 @@ on_tabline_menu(GtkWidget *widget, GdkEvent *event)
     static void
 on_select_tab(
 	GtkNotebook	*notebook UNUSED,
+#ifdef GTK_DISABLE_DEPRECATED
+        gpointer       *page UNUSED,
+#else
 	GtkNotebookPage *page UNUSED,
+#endif
 	gint		idx,
 	gpointer	data UNUSED)
 {
@@ -2975,7 +3370,11 @@ gui_mch_show_tabline(int showit)
 	gtk_notebook_set_show_tabs(GTK_NOTEBOOK(gui.tabline), showit);
 	update_window_manager_hints(0, 0);
 	if (showit)
+#ifdef GTK_DISABLE_DEPRECATED
+            gtk_widget_set_can_focus(GTK_WIDGET(gui.tabline), FALSE);
+#else
 	    GTK_WIDGET_UNSET_FLAGS(GTK_WIDGET(gui.tabline), GTK_CAN_FOCUS);
+#endif
     }
 
     gui_mch_update();
@@ -3023,7 +3422,12 @@ gui_mch_update_tabline(void)
 	if (page == NULL)
 	{
 	    /* Add notebook page */
+#if GTK_CHECK_VERSION(3,2,0)
+            page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+            gtk_box_set_homogeneous(GTK_BOX(page), FALSE);
+#else
 	    page = gtk_vbox_new(FALSE, 0);
+#endif
 	    gtk_widget_show(page);
 	    event_box = gtk_event_box_new();
 	    gtk_widget_show(event_box);
@@ -3038,9 +3442,18 @@ gui_mch_update_tabline(void)
 	}
 
 	event_box = gtk_notebook_get_tab_label(GTK_NOTEBOOK(gui.tabline), page);
+#ifdef GTK_DISABLE_DEPRECATED
+        g_object_set_data(G_OBJECT(event_box), "tab_num",
+                                                     GINT_TO_POINTER(tab_num));
+#else
 	gtk_object_set_user_data(GTK_OBJECT(event_box),
 						     (gpointer)(long)tab_num);
+#endif
+#ifdef GSEAL_ENABLE
+        label = gtk_bin_get_child(GTK_BIN(event_box));
+#else
 	label = GTK_BIN(event_box)->child;
+#endif
 	get_tabline_label(tp, FALSE);
 	labeltext = CONVERT_TO_UTF8(NameBuff);
 	gtk_label_set_text(GTK_LABEL(label), (const char *)labeltext);
@@ -3048,8 +3461,12 @@ gui_mch_update_tabline(void)
 
 	get_tabline_label(tp, TRUE);
 	labeltext = CONVERT_TO_UTF8(NameBuff);
+#ifdef GTK_DISABLE_DEPRECATED
+        gtk_widget_set_tooltip_text(event_box, (const gchar *)labeltext);
+#else
 	gtk_tooltips_set_tip(GTK_TOOLTIPS(tabline_tooltip), event_box,
 			     (const char *)labeltext, NULL);
+#endif
 	CONVERT_TO_UTF8_FREE(labeltext);
     }
 
@@ -3057,8 +3474,13 @@ gui_mch_update_tabline(void)
     while (gtk_notebook_get_nth_page(GTK_NOTEBOOK(gui.tabline), nr) != NULL)
 	gtk_notebook_remove_page(GTK_NOTEBOOK(gui.tabline), nr);
 
+#ifdef GTK_DISABLE_DEPRECATED
+    if (gtk_notebook_get_current_page(GTK_NOTEBOOK(gui.tabline)) != curtabidx)
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(gui.tabline), curtabidx);
+#else
     if (gtk_notebook_current_page(GTK_NOTEBOOK(gui.tabline)) != curtabidx)
 	gtk_notebook_set_page(GTK_NOTEBOOK(gui.tabline), curtabidx);
+#endif
 
     /* Make sure everything is in place before drawing text. */
     gui_mch_update();
@@ -3077,8 +3499,13 @@ gui_mch_set_curtab(nr)
 	return;
 
     ignore_tabline_evt = TRUE;
+#ifdef GTK_DISABLE_DEPRECATED
+    if (gtk_notebook_get_current_page(GTK_NOTEBOOK(gui.tabline)) != nr - 1)
+	gtk_notebook_set_current_page(GTK_NOTEBOOK(gui.tabline), nr - 1);
+#else
     if (gtk_notebook_current_page(GTK_NOTEBOOK(gui.tabline)) != nr - 1)
 	gtk_notebook_set_page(GTK_NOTEBOOK(gui.tabline), nr - 1);
+#endif
     ignore_tabline_evt = FALSE;
 }
 
@@ -3222,7 +3649,11 @@ gui_mch_init(void)
 #else
 	plug = gtk_plug_new(gtk_socket_id);
 #endif
+#ifdef GSEAL_ENABLE
+	if (plug != NULL && gtk_plug_get_socket_window(GTK_PLUG(plug)) != NULL)
+#else
 	if (plug != NULL && GTK_PLUG(plug)->socket_window != NULL)
+#endif
 	{
 	    gui.mainwin = plug;
 	}
@@ -3257,14 +3688,26 @@ gui_mch_init(void)
     gui.text_context = gtk_widget_create_pango_context(gui.mainwin);
     pango_context_set_base_dir(gui.text_context, PANGO_DIRECTION_LTR);
 
+#ifdef GTK_DISABLE_DEPRECATED
+    gtk_container_set_border_width(GTK_CONTAINER(gui.mainwin), 0);
+#else
     gtk_container_border_width(GTK_CONTAINER(gui.mainwin), 0);
+#endif
     gtk_widget_add_events(gui.mainwin, GDK_VISIBILITY_NOTIFY_MASK);
 
+#ifdef GTK_DISABLE_DEPRECATED
+    g_signal_connect(G_OBJECT(gui.mainwin), "delete-event",
+                     G_CALLBACK(&delete_event_cb), NULL);
+
+    g_signal_connect(G_OBJECT(gui.mainwin), "realize",
+                     G_CALLBACK(&mainwin_realize), NULL);
+#else
     gtk_signal_connect(GTK_OBJECT(gui.mainwin), "delete_event",
 		       GTK_SIGNAL_FUNC(&delete_event_cb), NULL);
 
     gtk_signal_connect(GTK_OBJECT(gui.mainwin), "realize",
 		       GTK_SIGNAL_FUNC(&mainwin_realize), NULL);
+#endif
 #ifdef HAVE_GTK_MULTIHEAD
     g_signal_connect(G_OBJECT(gui.mainwin), "screen_changed",
 		     G_CALLBACK(&mainwin_screen_changed_cb), NULL);
@@ -3273,7 +3716,12 @@ gui_mch_init(void)
     gtk_window_add_accel_group(GTK_WINDOW(gui.mainwin), gui.accel_group);
 
     /* A vertical box holds the menubar, toolbar and main text window. */
+#if GTK_CHECK_VERSION(3,2,0)
+    vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_box_set_homogeneous(GTK_BOX(vbox), FALSE);
+#else
     vbox = gtk_vbox_new(FALSE, 0);
+#endif
 
 #ifdef FEAT_GUI_GNOME
     if (using_gnome)
@@ -3336,11 +3784,15 @@ gui_mch_init(void)
      * Create the toolbar and handle
      */
     /* some aesthetics on the toolbar */
+#ifdef USE_GTK3
+    /* TODO: Use GtkCssProvider. */
+#else
     gtk_rc_parse_string(
 	    "style \"vim-toolbar-style\" {\n"
 	    "  GtkToolbar::button_relief = GTK_RELIEF_NONE\n"
 	    "}\n"
 	    "widget \"*.vim-toolbar\" style \"vim-toolbar-style\"\n");
+#endif
     gui.toolbar = gtk_toolbar_new();
     gtk_widget_set_name(gui.toolbar, "vim-toolbar");
     set_toolbar_style(GTK_TOOLBAR(gui.toolbar));
@@ -3382,39 +3834,66 @@ gui_mch_init(void)
     gtk_notebook_set_show_border(GTK_NOTEBOOK(gui.tabline), FALSE);
     gtk_notebook_set_show_tabs(GTK_NOTEBOOK(gui.tabline), FALSE);
     gtk_notebook_set_scrollable(GTK_NOTEBOOK(gui.tabline), TRUE);
+#ifndef GTK_DISABLE_DEPRECATED
     gtk_notebook_set_tab_border(GTK_NOTEBOOK(gui.tabline), FALSE);
+#endif
 
+#ifndef GTK_DISABLE_DEPRECATED
     tabline_tooltip = gtk_tooltips_new();
     gtk_tooltips_enable(GTK_TOOLTIPS(tabline_tooltip));
+#endif
 
     {
 	GtkWidget *page, *label, *event_box;
 
 	/* Add the first tab. */
+#if GTK_CHECK_VERSION(3,2,0)
+        page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+        gtk_box_set_homogeneous(GTK_BOX(vbox), FALSE);
+#else
 	page = gtk_vbox_new(FALSE, 0);
+#endif
 	gtk_widget_show(page);
 	gtk_container_add(GTK_CONTAINER(gui.tabline), page);
 	label = gtk_label_new("-Empty-");
 	gtk_widget_show(label);
 	event_box = gtk_event_box_new();
 	gtk_widget_show(event_box);
+#ifdef GTK_DISABLE_DEPRECATED
+	g_object_set_data(G_OBJECT(event_box), "tab_num", GINT_TO_POINTER(1L));
+#else
 	gtk_object_set_user_data(GTK_OBJECT(event_box), (gpointer)1L);
+#endif
 	gtk_misc_set_padding(GTK_MISC(label), 2, 2);
 	gtk_container_add(GTK_CONTAINER(event_box), label);
 	gtk_notebook_set_tab_label(GTK_NOTEBOOK(gui.tabline), page, event_box);
     }
 
+#ifdef GTK_DISABLE_DEPRECATED
+    g_signal_connect(G_OBJECT(gui.tabline), "switch-page",
+                     G_CALLBACK(on_select_tab), NULL);
+#else
     gtk_signal_connect(GTK_OBJECT(gui.tabline), "switch_page",
 		       GTK_SIGNAL_FUNC(on_select_tab), NULL);
+#endif
 
     /* Create a popup menu for the tab line and connect it. */
     tabline_menu = create_tabline_menu();
+#ifdef GTK_DISABLE_DEPRECATED
+    g_signal_connect_swapped(G_OBJECT(gui.tabline), "button-press-event",
+	    G_CALLBACK(on_tabline_menu), G_OBJECT(tabline_menu));
+#else
     gtk_signal_connect_object(GTK_OBJECT(gui.tabline), "button_press_event",
 	    GTK_SIGNAL_FUNC(on_tabline_menu), GTK_OBJECT(tabline_menu));
 #endif
+#endif
 
     gui.formwin = gtk_form_new();
+#ifdef GTK_DISABLE_DEPRECATED
+    gtk_container_set_border_width(GTK_CONTAINER(gui.formwin), 0);
+#else
     gtk_container_border_width(GTK_CONTAINER(gui.formwin), 0);
+#endif
     gtk_widget_set_events(gui.formwin, GDK_EXPOSURE_MASK);
 
     gui.drawarea = gtk_drawing_area_new();
@@ -3439,10 +3918,17 @@ gui_mch_init(void)
 
     /* For GtkSockets, key-presses must go to the focus widget (drawarea)
      * and not the window. */
+#ifdef GTK_DISABLE_DEPRECATED
+    g_signal_connect((gtk_socket_id == 0) ? G_OBJECT(gui.mainwin)
+				          : G_OBJECT(gui.drawarea),
+		       "key-press-event",
+		       G_CALLBACK(key_press_event), NULL);
+#else
     gtk_signal_connect((gtk_socket_id == 0) ? GTK_OBJECT(gui.mainwin)
 					    : GTK_OBJECT(gui.drawarea),
 		       "key_press_event",
 		       GTK_SIGNAL_FUNC(key_press_event), NULL);
+#endif
 #if defined(FEAT_XIM)
     /* Also forward key release events for the benefit of GTK+ 2 input
      * modules.  Try CTRL-SHIFT-xdigits to enter a Unicode code point. */
@@ -3451,6 +3937,15 @@ gui_mch_init(void)
 		     "key_release_event",
 		     G_CALLBACK(&key_release_event), NULL);
 #endif
+#ifdef GTK_DISABLE_DEPRECATED
+    g_signal_connect(G_OBJECT(gui.drawarea), "realize",
+                     G_CALLBACK(drawarea_realize_cb), NULL);
+    g_signal_connect(G_OBJECT(gui.drawarea), "unrealize",
+                     G_CALLBACK(drawarea_unrealize_cb), NULL);
+
+    g_signal_connect_after(G_OBJECT(gui.drawarea), "style-set",
+                           G_CALLBACK(&drawarea_style_set_cb), NULL);
+#else
     gtk_signal_connect(GTK_OBJECT(gui.drawarea), "realize",
 		       GTK_SIGNAL_FUNC(drawarea_realize_cb), NULL);
     gtk_signal_connect(GTK_OBJECT(gui.drawarea), "unrealize",
@@ -3458,8 +3953,11 @@ gui_mch_init(void)
 
     gtk_signal_connect_after(GTK_OBJECT(gui.drawarea), "style_set",
 			     GTK_SIGNAL_FUNC(&drawarea_style_set_cb), NULL);
+#endif
 
+#ifndef GDK_DISABLE_DEPRECATED
     gui.visibility = GDK_VISIBILITY_UNOBSCURED;
+#endif
 
 #if !(defined(FEAT_GUI_GNOME) && defined(FEAT_SESSION))
     wm_protocols_atom = gdk_atom_intern("WM_PROTOCOLS", FALSE);
@@ -3468,7 +3966,11 @@ gui_mch_init(void)
 
     if (gtk_socket_id != 0)
 	/* make sure keyboard input can go to the drawarea */
+#ifdef GTK_DISABLE_DEPRECATED
+        gtk_widget_set_can_focus(gui.drawarea, TRUE);
+#else
 	GTK_WIDGET_SET_FLAGS(gui.drawarea, GTK_CAN_FOCUS);
+#endif
 
     /*
      * Set clipboard specific atoms
@@ -3483,10 +3985,24 @@ gui_mch_init(void)
      */
     gui.border_offset = gui.border_width;
 
+#ifdef GTK_DISABLE_DEPRECATED
+#ifndef GDK_DISABLE_DEPRECATED
+    g_signal_connect(G_OBJECT(gui.mainwin), "visibility-notify-event",
+                     G_CALLBACK(visibility_event), NULL);
+#endif
+#ifdef USE_GTK3
+    g_signal_connect(G_OBJECT(gui.drawarea), "draw",
+                     G_CALLBACK(draw_event), NULL);
+#else
+    g_signal_connect(G_OBJECT(gui.drawarea), "expose-event",
+                     G_CALLBACK(expose_event), NULL);
+#endif
+#else
     gtk_signal_connect(GTK_OBJECT(gui.mainwin), "visibility_notify_event",
 		       GTK_SIGNAL_FUNC(visibility_event), NULL);
     gtk_signal_connect(GTK_OBJECT(gui.drawarea), "expose_event",
 		       GTK_SIGNAL_FUNC(expose_event), NULL);
+#endif
 
     /*
      * Only install these enter/leave callbacks when 'p' in 'guioptions'.
@@ -3494,10 +4010,17 @@ gui_mch_init(void)
      */
     if (vim_strchr(p_go, GO_POINTER) != NULL)
     {
+#ifdef GTK_DISABLE_DEPRECATED
+	g_signal_connect(G_OBJECT(gui.drawarea), "leave-notify-event",
+                         G_CALLBACK(leave_notify_event), NULL);
+	g_signal_connect(G_OBJECT(gui.drawarea), "enter-notify-event",
+                         G_CALLBACK(enter_notify_event), NULL);
+#else
 	gtk_signal_connect(GTK_OBJECT(gui.drawarea), "leave_notify_event",
 			   GTK_SIGNAL_FUNC(leave_notify_event), NULL);
 	gtk_signal_connect(GTK_OBJECT(gui.drawarea), "enter_notify_event",
 			   GTK_SIGNAL_FUNC(enter_notify_event), NULL);
+#endif
     }
 
     /* Real windows can get focus ... GtkPlug, being a mere container can't,
@@ -3506,25 +4029,56 @@ gui_mch_init(void)
      */
     if (gtk_socket_id == 0)
     {
+#ifdef GTK_DISABLE_DEPRECATED
+	g_signal_connect(G_OBJECT(gui.mainwin), "focus-out-event",
+                         G_CALLBACK(focus_out_event), NULL);
+	g_signal_connect(G_OBJECT(gui.mainwin), "focus-in-event",
+                         G_CALLBACK(focus_in_event), NULL);
+#else
 	gtk_signal_connect(GTK_OBJECT(gui.mainwin), "focus_out_event",
 			       GTK_SIGNAL_FUNC(focus_out_event), NULL);
 	gtk_signal_connect(GTK_OBJECT(gui.mainwin), "focus_in_event",
 			       GTK_SIGNAL_FUNC(focus_in_event), NULL);
+#endif
     }
     else
     {
+#ifdef GTK_DISABLE_DEPRECATED
+	g_signal_connect(G_OBJECT(gui.drawarea), "focus-out-event",
+                         G_CALLBACK(focus_out_event), NULL);
+	g_signal_connect(G_OBJECT(gui.drawarea), "focus-in-event",
+                         G_CALLBACK(focus_in_event), NULL);
+#else
 	gtk_signal_connect(GTK_OBJECT(gui.drawarea), "focus_out_event",
 			       GTK_SIGNAL_FUNC(focus_out_event), NULL);
 	gtk_signal_connect(GTK_OBJECT(gui.drawarea), "focus_in_event",
 			       GTK_SIGNAL_FUNC(focus_in_event), NULL);
+#endif
 #ifdef FEAT_GUI_TABLINE
+#ifdef GTK_DISABLE_DEPRECATED
+	g_signal_connect(G_OBJECT(gui.tabline), "focus-out-event",
+                         G_CALLBACK(focus_out_event), NULL);
+	g_signal_connect(G_OBJECT(gui.tabline), "focus-in-event",
+                         G_CALLBACK(focus_in_event), NULL);
+#else
 	gtk_signal_connect(GTK_OBJECT(gui.tabline), "focus_out_event",
 			       GTK_SIGNAL_FUNC(focus_out_event), NULL);
 	gtk_signal_connect(GTK_OBJECT(gui.tabline), "focus_in_event",
 			       GTK_SIGNAL_FUNC(focus_in_event), NULL);
+#endif
 #endif /* FEAT_GUI_TABLINE */
     }
 
+#ifdef GTK_DISABLE_DEPRECATED
+    g_signal_connect(G_OBJECT(gui.drawarea), "motion-notify-event",
+                     G_CALLBACK(motion_notify_event), NULL);
+    g_signal_connect(G_OBJECT(gui.drawarea), "button-press-event",
+                     G_CALLBACK(button_press_event), NULL);
+    g_signal_connect(G_OBJECT(gui.drawarea), "button-release-event",
+                     G_CALLBACK(button_release_event), NULL);
+    g_signal_connect(G_OBJECT(gui.drawarea), "scroll-event",
+		     G_CALLBACK(&scroll_event), NULL);
+#else
     gtk_signal_connect(GTK_OBJECT(gui.drawarea), "motion_notify_event",
 		       GTK_SIGNAL_FUNC(motion_notify_event), NULL);
     gtk_signal_connect(GTK_OBJECT(gui.drawarea), "button_press_event",
@@ -3533,19 +4087,32 @@ gui_mch_init(void)
 		       GTK_SIGNAL_FUNC(button_release_event), NULL);
     g_signal_connect(G_OBJECT(gui.drawarea), "scroll_event",
 		     G_CALLBACK(&scroll_event), NULL);
+#endif
 
     /*
      * Add selection handler functions.
      */
+#ifdef GTK_DISABLE_DEPRECATED
+    g_signal_connect(G_OBJECT(gui.drawarea), "selection-clear-event",
+                     G_CALLBACK(selection_clear_event), NULL);
+    g_signal_connect(G_OBJECT(gui.drawarea), "selection-received",
+                     G_CALLBACK(selection_received_cb), NULL);
+#else
     gtk_signal_connect(GTK_OBJECT(gui.drawarea), "selection_clear_event",
 		       GTK_SIGNAL_FUNC(selection_clear_event), NULL);
     gtk_signal_connect(GTK_OBJECT(gui.drawarea), "selection_received",
 		       GTK_SIGNAL_FUNC(selection_received_cb), NULL);
+#endif
 
     gui_gtk_set_selection_targets();
 
+#ifdef GTK_DISABLE_DEPRECATED
+    g_signal_connect(G_OBJECT(gui.drawarea), "selection-get",
+                     G_CALLBACK(selection_get_cb), NULL);
+#else
     gtk_signal_connect(GTK_OBJECT(gui.drawarea), "selection_get",
 		       GTK_SIGNAL_FUNC(selection_get_cb), NULL);
+#endif
 
     /* Pretend we don't have input focus, we will get an event if we do. */
     gui.in_focus = FALSE;
@@ -3573,6 +4140,34 @@ gui_mch_forked(void)
 }
 #endif /* FEAT_GUI_GNOME && FEAT_SESSION */
 
+#ifdef USE_GTK3
+    static void
+gui_gtk_get_rgb_from_pixel(guint32 pixel, GdkRGBA *result)
+{
+    GdkVisual * const visual = gtk_widget_get_visual(gui.drawarea);
+    guint32 r_mask, g_mask, b_mask;
+    gint r_shift, g_shift, b_shift;
+
+    if (visual == NULL)
+    {
+        result->red = 0.0;
+        result->green = 0.0;
+        result->blue = 0.0;
+        result->alpha = 0.0;
+        return;
+    }
+
+    gdk_visual_get_red_pixel_details(visual, &r_mask, &r_shift, NULL);
+    gdk_visual_get_green_pixel_details(visual, &g_mask, &g_shift, NULL);
+    gdk_visual_get_blue_pixel_details(visual, &b_mask, &b_shift, NULL);
+
+    result->red = ((pixel & r_mask) >> r_shift) / 255.0;
+    result->green = ((pixel & g_mask) >> g_shift) / 255.0;
+    result->blue = ((pixel & b_mask) >> b_shift) / 255.0;
+    result->alpha = 1.0;
+}
+#endif
+
 /*
  * Called when the foreground or background color has been changed.
  * This used to change the graphics contexts directly but we are
@@ -3581,12 +4176,28 @@ gui_mch_forked(void)
     void
 gui_mch_new_colors(void)
 {
+#ifdef GSEAL_ENABLE
+    if (gui.drawarea != NULL && gtk_widget_get_window(gui.drawarea) != NULL)
+#else
     if (gui.drawarea != NULL && gui.drawarea->window != NULL)
+#endif
     {
+#if GTK_CHECK_VERSION(3,4,0)
+        GdkRGBA color;
+
+        gui_gtk_get_rgb_from_pixel(gui.back_pixel, &color);
+        gdk_window_set_background_rgba(gtk_widget_get_window(gui.drawarea),
+                                       &color);
+#else
 	GdkColor color = { 0, 0, 0, 0 };
 
 	color.pixel = gui.back_pixel;
+#ifdef GSEAL_ENABLE
+	gdk_window_set_background(gtk_widget_get_window(gui.drawarea), &color);
+#else
 	gdk_window_set_background(gui.drawarea->window, &color);
+#endif
+#endif
     }
 }
 
@@ -3619,8 +4230,13 @@ form_configure_event(GtkWidget *widget UNUSED,
  * We can't do much more here than to trying to preserve what had been done,
  * since the window is already inevitably going away.
  */
+#if USE_GTK3
+    static void
+mainwin_destroy_cb(GObject *object UNUSED, gpointer data UNUSED)
+#else
     static void
 mainwin_destroy_cb(GtkObject *object UNUSED, gpointer data UNUSED)
+#endif
 {
     /* Don't write messages to the GUI anymore */
     full_screen = FALSE;
@@ -3800,8 +4416,13 @@ gui_mch_open(void)
      * changed them). */
     highlight_gui_started();	/* re-init colors and fonts */
 
+#ifdef GTK_DISABLE_DEPRECATED
+    g_signal_connect(G_OBJECT(gui.mainwin), "destroy",
+                     G_CALLBACK(mainwin_destroy_cb), NULL);
+#else
     gtk_signal_connect(GTK_OBJECT(gui.mainwin), "destroy",
 		       GTK_SIGNAL_FUNC(mainwin_destroy_cb), NULL);
+#endif
 
 #ifdef FEAT_HANGULIN
     hangul_keyboard_set();
@@ -3817,15 +4438,25 @@ gui_mch_open(void)
      * manager upon us and should not interfere with what VIM is requesting
      * upon startup.
      */
+#ifdef GTK_DISABLE_DEPRECATED
+    g_signal_connect(G_OBJECT(gui.formwin), "configure-event",
+                     G_CALLBACK(form_configure_event), NULL);
+#else
     gtk_signal_connect(GTK_OBJECT(gui.formwin), "configure_event",
 		       GTK_SIGNAL_FUNC(form_configure_event), NULL);
+#endif
 
 #ifdef FEAT_DND
     /* Set up for receiving DND items. */
     gui_gtk_set_dnd_targets();
 
+#ifdef GTK_DISABLE_DEPRECATED
+    g_signal_connect(G_OBJECT(gui.drawarea), "drag-data-received",
+                     G_CALLBACK(drag_data_received_cb), NULL);
+#else
     gtk_signal_connect(GTK_OBJECT(gui.drawarea), "drag_data_received",
 		       GTK_SIGNAL_FUNC(drag_data_received_cb), NULL);
+#endif
 #endif
 
 	/* With GTK+ 2, we need to iconify the window before calling show()
@@ -3946,9 +4577,15 @@ force_shell_resize_idle(gpointer data)
     int
 gui_mch_maximized()
 {
+#ifdef GSEAL_ENABLE
+    return (gui.mainwin != NULL && gtk_widget_get_window(gui.mainwin) != NULL
+	    && (gdk_window_get_state(gtk_widget_get_window(gui.mainwin))
+					       & GDK_WINDOW_STATE_MAXIMIZED));
+#else
     return (gui.mainwin != NULL && gui.mainwin->window != NULL
 	    && (gdk_window_get_state(gui.mainwin->window)
 					       & GDK_WINDOW_STATE_MAXIMIZED));
+#endif
 }
 
 /*
@@ -4085,7 +4722,11 @@ gui_mch_enable_menu(int showit)
 	widget = gui.menubar;
 
     /* Do not disable the menu while starting up, otherwise F10 doesn't work. */
+#ifdef GTK_DISABLE_DEPRECATED
+    if (!showit != !gtk_widget_get_visible(widget) && !gui.starting)
+#else
     if (!showit != !GTK_WIDGET_VISIBLE(widget) && !gui.starting)
+#endif
     {
 	if (showit)
 	    gtk_widget_show(widget);
@@ -4116,7 +4757,11 @@ gui_mch_show_toolbar(int showit)
     if (showit)
 	set_toolbar_style(GTK_TOOLBAR(gui.toolbar));
 
+#ifdef GTK_DISABLE_DEPRECATED
+    if (!showit != !gtk_widget_get_visible(widget))
+#else
     if (!showit != !GTK_WIDGET_VISIBLE(widget))
+#endif
     {
 	if (showit)
 	    gtk_widget_show(widget);
@@ -4210,6 +4855,11 @@ gui_mch_adjust_charheight(void)
  * a) implement our own (possibly copying the code from somewhere else) or
  * b) just live with it.
  */
+#ifdef USE_GTK3
+static gboolean font_filter(const PangoFontFamily *family,
+                            const PangoFontFace   *face,
+                            gpointer               data);
+#endif
     char_u *
 gui_mch_font_dialog(char_u *oldval)
 {
@@ -4218,7 +4868,13 @@ gui_mch_font_dialog(char_u *oldval)
     char_u	*fontname = NULL;
     char_u	*oldname;
 
+#if GTK_CHECK_VERSION(3,2,0)
+    dialog = gtk_font_chooser_dialog_new(NULL, NULL);
+    gtk_font_chooser_set_filter_func(GTK_FONT_CHOOSER(dialog), font_filter,
+                                      NULL, NULL);
+#else
     dialog = gtk_font_selection_dialog_new(NULL);
+#endif
 
     gtk_window_set_transient_for(GTK_WINDOW(dialog), GTK_WINDOW(gui.mainwin));
     gtk_window_set_destroy_with_parent(GTK_WINDOW(dialog), TRUE);
@@ -4245,15 +4901,25 @@ gui_mch_font_dialog(char_u *oldval)
 	    }
 	}
 
+#if GTK_CHECK_VERSION(3,2,0)
+        gtk_font_chooser_set_font(
+                GTK_FONT_CHOOSER(dialog), (const gchar *)oldname);
+#else
 	gtk_font_selection_dialog_set_font_name(
 		GTK_FONT_SELECTION_DIALOG(dialog), (const char *)oldname);
+#endif
 
 	if (oldname != oldval)
 	    vim_free(oldname);
     }
     else
+#if GTK_CHECK_VERSION(3,2,0)
+        gtk_font_chooser_set_font(
+		GTK_FONT_CHOOSER(dialog), DEFAULT_FONT);
+#else
 	gtk_font_selection_dialog_set_font_name(
 		GTK_FONT_SELECTION_DIALOG(dialog), DEFAULT_FONT);
+#endif
 
     response = gtk_dialog_run(GTK_DIALOG(dialog));
 
@@ -4261,8 +4927,12 @@ gui_mch_font_dialog(char_u *oldval)
     {
 	char *name;
 
+#if GTK_CHECK_VERSION(3,2,0)
+        name = gtk_font_chooser_get_font(GTK_FONT_CHOOSER(dialog));
+#else
 	name = gtk_font_selection_dialog_get_font_name(
 			    GTK_FONT_SELECTION_DIALOG(dialog));
+#endif
 	if (name != NULL)
 	{
 	    char_u  *p;
@@ -4286,6 +4956,16 @@ gui_mch_font_dialog(char_u *oldval)
 
     return fontname;
 }
+
+#ifdef USE_GTK3
+    static gboolean
+font_filter(const PangoFontFamily *family,
+            const PangoFontFace   *face UNUSED,
+            gpointer               data UNUSED)
+{
+    return pango_font_family_is_monospace((PangoFontFamily *)family);
+}
+#endif
 
 /*
  * Some monospace fonts don't support a bold weight, and fall back
@@ -4590,6 +5270,32 @@ gui_mch_free_font(GuiFont font)
 	pango_font_description_free(font);
 }
 
+#ifdef USE_GTK3
+    static guint32
+gui_gtk_get_pixel_from_rgb(const GdkRGBA *rgba)
+{
+    GdkVisual * const visual = gtk_widget_get_visual(gui.drawarea);
+    guint32 r_mask, g_mask, b_mask;
+    gint r_shift, g_shift, b_shift;
+    guint32 r, g, b;
+
+    if (visual == NULL)
+        return 0;
+
+    gdk_visual_get_red_pixel_details(visual, &r_mask, &r_shift, NULL);
+    gdk_visual_get_green_pixel_details(visual, &g_mask, &g_shift, NULL);
+    gdk_visual_get_blue_pixel_details(visual, &b_mask, &b_shift, NULL);
+
+    r = rgba->red * 65535;
+    g = rgba->green * 65535;
+    b = rgba->blue * 65535;
+
+    return ((r << r_shift) & r_mask) |
+           ((g << g_shift) & g_mask) |
+           ((b << b_shift) & b_mask);
+}
+#endif
+
 /*
  * Return the Pixel value (color) for the given color name.  This routine was
  * pretty much taken from example code in the Silicon Graphics OSF/Motif
@@ -4637,17 +5343,29 @@ gui_mch_get_color(char_u *name)
 
     while (name != NULL)
     {
+#ifdef USE_GTK3
+        GdkRGBA     color;
+#else
 	GdkColor    color;
+#endif
 	int	    parsed;
 	int	    i;
 
+#ifdef USE_GTK3
+        parsed = gdk_rgba_parse(&color, (const gchar *)name);
+#else
 	parsed = gdk_color_parse((const char *)name, &color);
+#endif
 
 	if (parsed)
 	{
+#ifdef USE_GTK3
+            return (guicolor_T)gui_gtk_get_pixel_from_rgb(&color);
+#else
 	    gdk_colormap_alloc_color(gtk_widget_get_colormap(gui.drawarea),
 				     &color, FALSE, TRUE);
 	    return (guicolor_T)color.pixel;
+#endif
 	}
 	/* add a few builtin names and try again */
 	for (i = 0; ; ++i)
@@ -4839,12 +5557,43 @@ setup_zero_width_cluster(PangoItem *item, PangoGlyphInfo *glyph,
 	glyph->geometry.x_offset = -width + MAX(0, width - ink_rect.width) / 2;
 }
 
+#ifdef GDK_DISABLE_DEPRECATED
+    static void
+set_cairo_source_rgb_from_pixel(cairo_t *cr, guint32 pixel)
+{
+    GdkRGBA result;
+#ifdef USE_GTK3
+    gui_gtk_get_rgb_from_pixel(pixel, &result);
+#else
+    gdk_colormap_query_color(gtk_widget_get_colormap(gui.drawarea),
+                             pixel,
+                             &result);
+#endif
+    cairo_set_source_rgb(cr, result.red, result.green, result.blue);
+}
+#endif
+
+#ifdef GDK_DISABLE_DEPRECATED
+    static void
+draw_glyph_string(int row, int col, int num_cells, int flags,
+		  PangoFont *font, PangoGlyphString *glyphs,
+                  cairo_t *cr)
+#else
     static void
 draw_glyph_string(int row, int col, int num_cells, int flags,
 		  PangoFont *font, PangoGlyphString *glyphs)
+#endif
 {
     if (!(flags & DRAW_TRANSP))
     {
+#ifdef GDK_DISABLE_DEPRECATED
+        set_cairo_source_rgb_from_pixel(cr, gui.bgcolor->pixel);
+        cairo_set_line_width(cr, 1.0);
+        cairo_rectangle(cr,
+                        FILL_X(col), FILL_Y(row),
+                        num_cells * gui.char_width, gui.char_height);
+        cairo_fill(cr);
+#else
 	gdk_gc_set_foreground(gui.text_gc, gui.bgcolor);
 
 	gdk_draw_rectangle(gui.drawarea->window,
@@ -4854,8 +5603,14 @@ draw_glyph_string(int row, int col, int num_cells, int flags,
 			   FILL_Y(row),
 			   num_cells * gui.char_width,
 			   gui.char_height);
+#endif
     }
 
+#ifdef GDK_DISABLE_DEPRECATED
+    set_cairo_source_rgb_from_pixel(cr, gui.fgcolor->pixel);
+    cairo_move_to(cr, TEXT_X(col), TEXT_Y(row));
+    pango_cairo_show_glyph_string(cr, font, glyphs);
+#else
     gdk_gc_set_foreground(gui.text_gc, gui.fgcolor);
 
     gdk_draw_glyphs(gui.drawarea->window,
@@ -4864,22 +5619,36 @@ draw_glyph_string(int row, int col, int num_cells, int flags,
 		    TEXT_X(col),
 		    TEXT_Y(row),
 		    glyphs);
+#endif
 
     /* redraw the contents with an offset of 1 to emulate bold */
     if ((flags & DRAW_BOLD) && !gui.font_can_bold)
+#ifdef GDK_DISABLE_DEPRECATED
+    {
+        set_cairo_source_rgb_from_pixel(cr, gui.fgcolor->pixel);
+        cairo_move_to(cr, TEXT_X(col) + 1, TEXT_Y(row));
+        pango_cairo_show_glyph_string(cr, font, glyphs);
+    }
+#else
 	gdk_draw_glyphs(gui.drawarea->window,
 			gui.text_gc,
 			font,
 			TEXT_X(col) + 1,
 			TEXT_Y(row),
 			glyphs);
+#endif
 }
 
 /*
  * Draw underline and undercurl at the bottom of the character cell.
  */
+#ifdef GDK_DISABLE_DEPRECATED
+    static void
+draw_under(int flags, int row, int col, int cells, cairo_t *cr)
+#else
     static void
 draw_under(int flags, int row, int col, int cells)
+#endif
 {
     int			i;
     int			offset;
@@ -4889,6 +5658,17 @@ draw_under(int flags, int row, int col, int cells)
     /* Undercurl: draw curl at the bottom of the character cell. */
     if (flags & DRAW_UNDERC)
     {
+#ifdef GDK_DISABLE_DEPRECATED
+        cairo_set_line_width(cr, 1.0);
+        cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT);
+        set_cairo_source_rgb_from_pixel(cr, gui.spcolor->pixel);
+	for (i = FILL_X(col); i < FILL_X(col + cells); ++i)
+	{
+	    offset = val[i % 8];
+	    cairo_line_to(cr, i, y - offset + 0.5);
+	}
+        cairo_stroke(cr);
+#else
 	gdk_gc_set_foreground(gui.text_gc, gui.spcolor);
 	for (i = FILL_X(col); i < FILL_X(col + cells); ++i)
 	{
@@ -4896,6 +5676,7 @@ draw_under(int flags, int row, int col, int cells)
 	    gdk_draw_point(gui.drawarea->window, gui.text_gc, i, y - offset);
 	}
 	gdk_gc_set_foreground(gui.text_gc, gui.fgcolor);
+#endif
     }
 
     /* Underline: draw a line at the bottom of the character cell. */
@@ -4905,9 +5686,20 @@ draw_under(int flags, int row, int col, int cells)
 	 * Otherwise put the line just below the character. */
 	if (p_linespace > 1)
 	    y -= p_linespace - 1;
+#ifdef GDK_DISABLE_DEPRECATED
+        {
+            cairo_set_line_width(cr, 1.0);
+            cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT);
+            set_cairo_source_rgb_from_pixel(cr, gui.fgcolor->pixel);
+            cairo_move_to(cr, FILL_X(col), y + 0.5);
+            cairo_line_to(cr, FILL_X(col + cells), y + 0.5);
+            cairo_stroke(cr);
+        }
+#else
 	gdk_draw_line(gui.drawarea->window, gui.text_gc,
 		      FILL_X(col), y,
 		      FILL_X(col + cells) - 1, y);
+#endif
     }
 }
 
@@ -4923,8 +5715,15 @@ gui_gtk2_draw_string(int row, int col, char_u *s, int len, int flags)
     int			convlen;
     char_u		*sp, *bp;
     int			plen;
+#ifdef GDK_DISABLE_DEPRECATED
+    cairo_t            *cr;
+#endif
 
+#ifdef GSEAL_ENABLE
+    if (gui.text_context == NULL || gtk_widget_get_window(gui.drawarea) == NULL)
+#else
     if (gui.text_context == NULL || gui.drawarea->window == NULL)
+#endif
 	return len;
 
     if (output_conv.vc_type != CONV_NONE)
@@ -4977,8 +5776,14 @@ gui_gtk2_draw_string(int row, int col, char_u *s, int len, int flags)
     area.width	= gui.num_cols * gui.char_width;
     area.height = gui.char_height;
 
+#ifdef GDK_DISABLE_DEPRECATED
+    cr = gdk_cairo_create(gtk_widget_get_window(gui.drawarea));
+    cairo_rectangle(cr, area.x, area.y, area.width, area.height);
+    cairo_clip(cr);
+#else
     gdk_gc_set_clip_origin(gui.text_gc, 0, 0);
     gdk_gc_set_clip_rectangle(gui.text_gc, &area);
+#endif
 
     glyphs = pango_glyph_string_new();
 
@@ -5005,7 +5810,11 @@ gui_gtk2_draw_string(int row, int col, char_u *s, int len, int flags)
 	    glyphs->log_clusters[i] = i;
 	}
 
+#ifdef GDK_DISABLE_DEPRECATED
+	draw_glyph_string(row, col, len, flags, gui.ascii_font, glyphs, cr);
+#else
 	draw_glyph_string(row, col, len, flags, gui.ascii_font, glyphs);
+#endif
 
 	column_offset = len;
     }
@@ -5163,8 +5972,14 @@ not_ascii:
 	    }
 
 	    /*** Aaaaand action! ***/
+#ifdef GDK_DISABLE_DEPRECATED
+	    draw_glyph_string(row, col + column_offset, item_cells,
+			      flags, item->analysis.font, glyphs,
+                              cr);
+#else
 	    draw_glyph_string(row, col + column_offset, item_cells,
 			      flags, item->analysis.font, glyphs);
+#endif
 
 	    pango_item_free(item);
 
@@ -5176,12 +5991,20 @@ not_ascii:
 
 skipitall:
     /* Draw underline and undercurl. */
+#ifdef GDK_DISABLE_DEPRECATED
+    draw_under(flags, row, col, column_offset, cr);
+#else
     draw_under(flags, row, col, column_offset);
+#endif
 
     pango_glyph_string_free(glyphs);
     vim_free(conv_buf);
 
+#ifdef GDK_DISABLE_DEPRECATED
+    cairo_destroy(cr);
+#else
     gdk_gc_set_clip_rectangle(gui.text_gc, NULL);
+#endif
 
     return column_offset;
 }
@@ -5208,10 +6031,23 @@ gui_mch_haskey(char_u *name)
     int
 gui_get_x11_windis(Window *win, Display **dis)
 {
+#ifdef GSEAL_ENABLE
+    if (gui.mainwin != NULL && gtk_widget_get_window(gui.mainwin) != NULL)
+#else
     if (gui.mainwin != NULL && gui.mainwin->window != NULL)
+#endif
     {
+#ifdef GSEAL_ENABLE
+	*dis = GDK_WINDOW_XDISPLAY(gtk_widget_get_window(gui.mainwin));
+#ifdef USE_GTK3
+	*win = GDK_WINDOW_XID(gtk_widget_get_window(gui.mainwin));
+#else
+	*win = GDK_WINDOW_XWINDOW(gtk_widget_get_window(gui.mainwin));
+#endif
+#else
 	*dis = GDK_WINDOW_XDISPLAY(gui.mainwin->window);
 	*win = GDK_WINDOW_XWINDOW(gui.mainwin->window);
+#endif
 	return OK;
     }
 
@@ -5227,8 +6063,13 @@ gui_get_x11_windis(Window *win, Display **dis)
     Display *
 gui_mch_get_display(void)
 {
+#ifdef GSEAL_ENABLE
+    if (gui.mainwin != NULL && gtk_widget_get_window(gui.mainwin) != NULL)
+	return GDK_WINDOW_XDISPLAY(gtk_widget_get_window(gui.mainwin));
+#else
     if (gui.mainwin != NULL && gui.mainwin->window != NULL)
 	return GDK_WINDOW_XDISPLAY(gui.mainwin->window);
+#endif
     else
 	return NULL;
 }
@@ -5240,7 +6081,11 @@ gui_mch_beep(void)
 #ifdef HAVE_GTK_MULTIHEAD
     GdkDisplay *display;
 
+#ifdef GTK_DISABLE_DEPRECATED
+    if (gui.mainwin != NULL && gtk_widget_get_realized(gui.mainwin))
+#else
     if (gui.mainwin != NULL && GTK_WIDGET_REALIZED(gui.mainwin))
+#endif
 	display = gtk_widget_get_display(gui.mainwin);
     else
 	display = gdk_display_get_default();
@@ -5255,12 +6100,69 @@ gui_mch_beep(void)
     void
 gui_mch_flash(int msec)
 {
+#ifdef GDK_DISABLE_DEPRECATED
+    GdkWindow *drawarea;
+    cairo_t *cr;
+    gint width, height;
+    cairo_surface_t *bg_surf;
+    cairo_surface_t *fg_surf;
+    cairo_t *bg_cr;
+    cairo_t *fg_cr;
+#else
     GdkGCValues	values;
     GdkGC	*invert_gc;
+#endif
 
+#ifdef GSEAL_ENABLE
+    if (gtk_widget_get_window(gui.drawarea) == NULL)
+#else
     if (gui.drawarea->window == NULL)
+#endif
 	return;
 
+#ifdef GDK_DISABLE_DEPRECATED
+    drawarea = gtk_widget_get_window(gui.drawarea);
+
+    cr = gdk_cairo_create(drawarea);
+    width = gdk_window_get_width(drawarea);
+    height = gdk_window_get_height(drawarea);
+
+    bg_surf = cairo_surface_create_similar(cairo_get_target(cr),
+                                           CAIRO_CONTENT_COLOR,
+                                           width, height);
+    fg_surf = cairo_surface_create_similar(cairo_get_target(cr),
+                                           CAIRO_CONTENT_COLOR,
+                                           width, height);
+
+    bg_cr = cairo_create(bg_surf);
+    set_cairo_source_rgb_from_pixel(bg_cr, gui.norm_pixel ^ gui.back_pixel);
+    cairo_rectangle(
+        bg_cr,
+        0,
+        0,
+        FILL_X((int)Columns) + gui.border_offset,
+        FILL_Y((int)Rows) + gui.border_offset
+    );
+    cairo_fill(bg_cr);
+
+    fg_cr = cairo_create(fg_surf);
+    set_cairo_source_rgb_from_pixel(fg_cr, gui.norm_pixel ^ gui.back_pixel);
+    cairo_rectangle(
+        fg_cr,
+        0,
+        0,
+        FILL_X((int)Columns) + gui.border_offset,
+        FILL_Y((int)Rows) + gui.border_offset
+    );
+    cairo_fill(fg_cr);
+
+    cairo_set_operator(fg_cr, CAIRO_OPERATOR_XOR);
+    cairo_set_source_surface(fg_cr, bg_surf, 0.0, 0.0);
+    cairo_paint(fg_cr);
+
+    cairo_set_source_surface(cr, fg_surf, 0.0, 0.0);
+    cairo_paint(cr);
+#else
     values.foreground.pixel = gui.norm_pixel ^ gui.back_pixel;
     values.background.pixel = gui.norm_pixel ^ gui.back_pixel;
     values.function = GDK_XOR;
@@ -5283,10 +6185,21 @@ gui_mch_flash(int msec)
 		       0, 0,
 		       FILL_X((int)Columns) + gui.border_offset,
 		       FILL_Y((int)Rows) + gui.border_offset);
+#endif
 
     gui_mch_flush();
     ui_delay((long)msec, TRUE);	/* wait so many msec */
 
+#ifdef GDK_DISABLE_DEPRECATED
+    cairo_set_source_surface(cr, fg_surf, 0.0, 0.0);
+    cairo_paint(cr);
+
+    cairo_destroy(fg_cr);
+    cairo_destroy(bg_cr);
+    cairo_surface_destroy(fg_surf);
+    cairo_surface_destroy(bg_surf);
+    cairo_destroy(cr);
+#else
     gdk_draw_rectangle(gui.drawarea->window, invert_gc,
 		       TRUE,
 		       0, 0,
@@ -5294,6 +6207,7 @@ gui_mch_flash(int msec)
 		       FILL_Y((int)Rows) + gui.border_offset);
 
     gdk_gc_destroy(invert_gc);
+#endif
 }
 
 /*
@@ -5302,12 +6216,75 @@ gui_mch_flash(int msec)
     void
 gui_mch_invert_rectangle(int r, int c, int nr, int nc)
 {
+#ifdef GDK_DISABLE_DEPRECATED
+    GdkWindow *drawarea;
+    cairo_t *cr;
+    gint width, height;
+    cairo_surface_t *bg_surf;
+    cairo_surface_t *fg_surf;
+    cairo_t *bg_cr;
+    cairo_t *fg_cr;
+#else
     GdkGCValues values;
     GdkGC *invert_gc;
+#endif
 
+#ifdef GSEAL_ENABLE
+    if (gtk_widget_get_window(gui.drawarea) == NULL)
+#else
     if (gui.drawarea->window == NULL)
+#endif
 	return;
 
+#ifdef GDK_DISABLE_DEPRECATED
+    drawarea = gtk_widget_get_window(gui.drawarea);
+
+    cr = gdk_cairo_create(drawarea);
+    width = gdk_window_get_width(drawarea);
+    height = gdk_window_get_height(drawarea);
+
+    bg_surf = cairo_surface_create_similar(cairo_get_target(cr),
+                                           CAIRO_CONTENT_COLOR,
+                                           width, height);
+    fg_surf = cairo_surface_create_similar(cairo_get_target(cr),
+                                           CAIRO_CONTENT_COLOR,
+                                           width, height);
+
+    bg_cr = cairo_create(bg_surf);
+    set_cairo_source_rgb_from_pixel(bg_cr, gui.norm_pixel ^ gui.back_pixel);
+    cairo_rectangle(
+        bg_cr,
+        FILL_X(c),
+        FILL_Y(r),
+        (nc) * gui.char_width,
+        (nr) * gui.char_height
+    );
+    cairo_fill(bg_cr);
+
+    fg_cr = cairo_create(bg_surf);
+    set_cairo_source_rgb_from_pixel(fg_cr, gui.norm_pixel ^ gui.back_pixel);
+    cairo_rectangle(
+        fg_cr,
+        FILL_X(c),
+        FILL_Y(r),
+        (nc) * gui.char_width,
+        (nr) * gui.char_height
+    );
+    cairo_fill(fg_cr);
+
+    cairo_set_operator(fg_cr, CAIRO_OPERATOR_XOR);
+    cairo_set_source_surface(fg_cr, bg_surf, 0.0, 0.0);
+    cairo_paint(fg_cr);
+
+    cairo_set_source_surface(cr, fg_surf, 0.0, 0.0);
+    cairo_paint(cr);
+
+    cairo_destroy(fg_cr);
+    cairo_destroy(bg_cr);
+    cairo_surface_destroy(bg_surf);
+    cairo_surface_destroy(fg_surf);
+    cairo_destroy(cr);
+#else
     values.foreground.pixel = gui.norm_pixel ^ gui.back_pixel;
     values.background.pixel = gui.norm_pixel ^ gui.back_pixel;
     values.function = GDK_XOR;
@@ -5323,6 +6300,7 @@ gui_mch_invert_rectangle(int r, int c, int nr, int nc)
 		       FILL_X(c), FILL_Y(r),
 		       (nc) * gui.char_width, (nr) * gui.char_height);
     gdk_gc_destroy(invert_gc);
+#endif
 }
 
 /*
@@ -5352,19 +6330,45 @@ gui_mch_set_foreground(void)
 gui_mch_draw_hollow_cursor(guicolor_T color)
 {
     int		i = 1;
+#ifdef GDK_DISABLE_DEPRECATED
+    cairo_t    *cr;
+#endif
 
+#ifdef GSEAL_ENABLE
+    if (gtk_widget_get_window(gui.drawarea) == NULL)
+#else
     if (gui.drawarea->window == NULL)
+#endif
 	return;
+
+#ifdef GDK_DISABLE_DEPRECATED
+    cr = gdk_cairo_create(gtk_widget_get_window(gui.drawarea));
+#endif
 
     gui_mch_set_fg_color(color);
 
+#ifdef GDK_DISABLE_DEPRECATED
+    cairo_set_line_width(cr, 1.0);
+    set_cairo_source_rgb_from_pixel(cr, gui.fgcolor->pixel);
+#else
     gdk_gc_set_foreground(gui.text_gc, gui.fgcolor);
+#endif
     if (mb_lefthalve(gui.row, gui.col))
 	i = 2;
+#ifdef GDK_DISABLE_DEPRECATED
+    cairo_set_line_width(cr, 1.0);
+    cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT);
+    cairo_rectangle(cr,
+                    FILL_X(gui.col) + 0.5, FILL_Y(gui.row) + 0.5,
+                    i * gui.char_width - 1, gui.char_height - 1);
+    cairo_stroke(cr);
+    cairo_destroy(cr);
+#else
     gdk_draw_rectangle(gui.drawarea->window, gui.text_gc,
 	    FALSE,
 	    FILL_X(gui.col), FILL_Y(gui.row),
 	    i * gui.char_width - 1, gui.char_height - 1);
+#endif
 }
 
 /*
@@ -5374,11 +6378,33 @@ gui_mch_draw_hollow_cursor(guicolor_T color)
     void
 gui_mch_draw_part_cursor(int w, int h, guicolor_T color)
 {
+#ifdef GSEAL_ENABLE
+    if (gtk_widget_get_window(gui.drawarea) == NULL)
+#else
     if (gui.drawarea->window == NULL)
+#endif
 	return;
 
     gui_mch_set_fg_color(color);
 
+#ifdef GDK_DISABLE_DEPRECATED
+    {
+        cairo_t *cr;
+
+        cr = gdk_cairo_create(gtk_widget_get_window(gui.drawarea));
+        cairo_set_line_width(cr, 1.0);
+        set_cairo_source_rgb_from_pixel(cr, gui.fgcolor->pixel);
+        cairo_rectangle(cr,
+#ifdef FEAT_RIGHTLEFT
+	    /* vertical line should be on the right of current point */
+	    CURSOR_BAR_RIGHT ? FILL_X(gui.col + 1) - w :
+#endif
+	    FILL_X(gui.col), FILL_Y(gui.row) + gui.char_height - h,
+	    w, h);
+        cairo_fill(cr);
+        cairo_destroy(cr);
+    }
+#else
     gdk_gc_set_foreground(gui.text_gc, gui.fgcolor);
     gdk_draw_rectangle(gui.drawarea->window, gui.text_gc,
 	    TRUE,
@@ -5389,6 +6415,7 @@ gui_mch_draw_part_cursor(int w, int h, guicolor_T color)
 	    FILL_X(gui.col),
 	    FILL_Y(gui.row) + gui.char_height - h,
 	    w, h);
+#endif
 }
 
 
@@ -5405,7 +6432,11 @@ gui_mch_update(void)
 	g_main_context_iteration(NULL, TRUE);
 }
 
+#ifdef GTK_DISABLE_DEPRECATED
+    static gboolean
+#else
     static gint
+#endif
 input_timer_cb(gpointer data)
 {
     int *timed_out = (int *) data;
@@ -5474,7 +6505,11 @@ gui_mch_wait_for_chars(long wtime)
      * time */
 
     if (wtime > 0)
+#ifdef GTK_DISABLE_DEPRECATED
+	timer = g_timeout_add((guint)wtime, input_timer_cb, &timed_out);
+#else
 	timer = gtk_timeout_add((guint32)wtime, input_timer_cb, &timed_out);
+#endif
     else
 	timer = 0;
 
@@ -5508,7 +6543,11 @@ gui_mch_wait_for_chars(long wtime)
 	if (input_available())
 	{
 	    if (timer != 0 && !timed_out)
+#ifdef GTK_DISABLE_DEPRECATED
+		g_source_remove(timer);
+#else
 		gtk_timeout_remove(timer);
+#endif
 	    return OK;
 	}
     } while (wtime < 0 || !timed_out);
@@ -5532,15 +6571,24 @@ gui_mch_wait_for_chars(long wtime)
 gui_mch_flush(void)
 {
 #ifdef HAVE_GTK_MULTIHEAD
+#ifdef GTK_DISABLE_DEPRECATED
+    if (gui.mainwin != NULL && gtk_widget_get_realized(gui.mainwin))
+#else
     if (gui.mainwin != NULL && GTK_WIDGET_REALIZED(gui.mainwin))
+#endif
 	gdk_display_sync(gtk_widget_get_display(gui.mainwin));
 #else
     gdk_flush(); /* historical misnomer: calls XSync(), not XFlush() */
 #endif
     /* This happens to actually do what gui_mch_flush() is supposed to do,
      * according to the comment above. */
+#ifdef GSEAL_ENABLE
+    if (gui.drawarea != NULL && gtk_widget_get_window(gui.drawarea) != NULL)
+	gdk_window_process_updates(gtk_widget_get_window(gui.drawarea), FALSE);
+#else
     if (gui.drawarea != NULL && gui.drawarea->window != NULL)
 	gdk_window_process_updates(gui.drawarea->window, FALSE);
+#endif
 }
 
 /*
@@ -5552,11 +6600,30 @@ gui_mch_clear_block(int row1, int col1, int row2, int col2)
 {
     GdkColor color;
 
+#ifdef GSEAL_ENABLE
+    if (gtk_widget_get_window(gui.drawarea) == NULL)
+#else
     if (gui.drawarea->window == NULL)
+#endif
 	return;
 
     color.pixel = gui.back_pixel;
 
+#ifdef GDK_DISABLE_DEPRECATED
+    {
+        cairo_t *cr;
+
+        cr = gdk_cairo_create(gtk_widget_get_window(gui.drawarea));
+        cairo_set_line_width(cr, 1.0);
+        set_cairo_source_rgb_from_pixel(cr, color.pixel);
+        cairo_rectangle(cr,
+                        FILL_X(col1), FILL_Y(row1),
+                        (col2 - col1 + 1) * gui.char_width + (col2 == Columns - 1),
+                        (row2 - row1 + 1) * gui.char_height);
+        cairo_fill(cr);
+        cairo_destroy(cr);
+    }
+#else
     gdk_gc_set_foreground(gui.text_gc, &color);
 
     /* Clear one extra pixel at the far right, for when bold characters have
@@ -5566,15 +6633,54 @@ gui_mch_clear_block(int row1, int col1, int row2, int col2)
 		       (col2 - col1 + 1) * gui.char_width
 						      + (col2 == Columns - 1),
 		       (row2 - row1 + 1) * gui.char_height);
+#endif
 }
+
+#ifdef USE_GTK3
+    static void
+gui_gtk_window_clear(GdkWindow *win)
+{
+    cairo_pattern_t *pat;
+    cairo_t *cr;
+
+    cr = gdk_cairo_create(win);
+
+    pat = gdk_window_get_background_pattern(win);
+    if (pat)
+    {
+        cairo_set_source(cr, pat);
+        cairo_paint(cr);
+    }
+    else
+    {
+        set_cairo_source_rgb_from_pixel(cr, gui.back_pixel);
+        cairo_rectangle(cr, 0, 0,
+                        gdk_window_get_width(win),
+                        gdk_window_get_height(win));
+        cairo_fill(cr);
+    }
+
+    cairo_destroy(cr);
+}
+#endif
 
     void
 gui_mch_clear_all(void)
 {
+#ifdef GSEAL_ENABLE
+    if (gtk_widget_get_window(gui.drawarea) != NULL)
+#ifdef USE_GTK3
+        gui_gtk_window_clear(gtk_widget_get_window(gui.drawarea));
+#else
+	gdk_window_clear(gtk_widget_get_window(gui.drawarea));
+#endif
+#else
     if (gui.drawarea->window != NULL)
 	gdk_window_clear(gui.drawarea->window);
+#endif
 }
 
+#ifndef GDK_DISABLE_DEPRECATED
 /*
  * Redraw any text revealed by scrolling up/down.
  */
@@ -5611,6 +6717,34 @@ check_copy_area(void)
 
     gui_can_update_cursor();
 }
+#endif
+
+#ifdef GDK_DISABLE_DEPRECATED
+    static void
+gui_gtk_shift_lines(int row, int num_lines, int from, int to)
+{
+    const int y_src  = FILL_Y(from);
+    const int y_dest = FILL_Y(to);
+
+    const int left   = gui.scroll_region_left;
+    const int right  = gui.scroll_region_right;
+    const int bot    = gui.scroll_region_bot;
+    const int x      = FILL_X(left);
+    const int width  = gui.char_width * (right - left + 1) + 1;
+    const int height = gui.char_height * (bot - row - num_lines + 1);
+
+    gdk_window_scroll(gtk_widget_get_window(gui.drawarea), 0, y_dest - y_src);
+
+    if (from > to)
+        gui_clear_block(bot - num_lines + 1, left, bot, right);
+    else
+        gui_clear_block(row, left, row + num_lines - 1, right);
+
+    gui_dont_update_cursor();
+    gui_redraw(x, y_dest, width, height);
+    gui_can_update_cursor();
+}
+#endif
 
 /*
  * Delete the given number of lines from the given row, scrolling up any
@@ -5619,6 +6753,9 @@ check_copy_area(void)
     void
 gui_mch_delete_lines(int row, int num_lines)
 {
+#ifdef GDK_DISABLE_DEPRECATED
+    gui_gtk_shift_lines(row, num_lines, row + num_lines, row);
+#else
     if (gui.visibility == GDK_VISIBILITY_FULLY_OBSCURED)
 	return;			/* Can't see the window */
 
@@ -5639,6 +6776,7 @@ gui_mch_delete_lines(int row, int num_lines)
 						       gui.scroll_region_left,
 		    gui.scroll_region_bot, gui.scroll_region_right);
     check_copy_area();
+#endif
 }
 
 /*
@@ -5648,6 +6786,9 @@ gui_mch_delete_lines(int row, int num_lines)
     void
 gui_mch_insert_lines(int row, int num_lines)
 {
+#ifdef GDK_DISABLE_DEPRECATED
+    gui_gtk_shift_lines(row, num_lines, row, row + num_lines);
+#else
     if (gui.visibility == GDK_VISIBILITY_FULLY_OBSCURED)
 	return;			/* Can't see the window */
 
@@ -5666,6 +6807,7 @@ gui_mch_insert_lines(int row, int num_lines)
     gui_clear_block(row, gui.scroll_region_left,
 				row + num_lines - 1, gui.scroll_region_right);
     check_copy_area();
+#endif
 }
 
 /*
@@ -5701,7 +6843,11 @@ clip_mch_request_selection(VimClipboard *cbd)
     }
 
     /* Final fallback position - use the X CUT_BUFFER0 store */
+#ifdef GSEAL_ENABLE
+    yank_cut_buffer0(GDK_WINDOW_XDISPLAY(gtk_widget_get_window(gui.mainwin)), cbd);
+#else
     yank_cut_buffer0(GDK_WINDOW_XDISPLAY(gui.mainwin->window), cbd);
+#endif
 }
 
 /*
@@ -5759,7 +6905,11 @@ gui_mch_menu_grey(vimmenu_T *menu, int grey)
 
     gui_mch_menu_hidden(menu, FALSE);
     /* Be clever about bitfields versus true booleans here! */
+#ifdef GTK_DISABLE_DEPRECATED
+    if (!gtk_widget_get_sensitive(menu->id) == !grey)
+#else
     if (!GTK_WIDGET_SENSITIVE(menu->id) == !grey)
+#endif
     {
 	gtk_widget_set_sensitive(menu->id, !grey);
 	gui_mch_update();
@@ -5777,7 +6927,11 @@ gui_mch_menu_hidden(vimmenu_T *menu, int hidden)
 
     if (hidden)
     {
+#ifdef GTK_DISABLE_DEPRECATED
+	if (gtk_widget_get_visible(menu->id))
+#else
 	if (GTK_WIDGET_VISIBLE(menu->id))
+#endif
 	{
 	    gtk_widget_hide(menu->id);
 	    gui_mch_update();
@@ -5785,7 +6939,11 @@ gui_mch_menu_hidden(vimmenu_T *menu, int hidden)
     }
     else
     {
+#ifdef GTK_DISABLE_DEPRECATED
+	if (!gtk_widget_get_visible(menu->id))
+#else
 	if (!GTK_WIDGET_VISIBLE(menu->id))
+#endif
 	{
 	    gtk_widget_show(menu->id);
 	    gui_mch_update();
@@ -5829,8 +6987,18 @@ gui_mch_enable_scrollbar(scrollbar_T *sb, int flag)
 gui_mch_get_rgb(guicolor_T pixel)
 {
     GdkColor color;
+#ifdef USE_GTK3
+    GdkRGBA rgba;
+
+    gui_gtk_get_rgb_from_pixel(pixel, &rgba);
+
+    color.red = rgba.red * 65535;
+    color.green = rgba.green * 65535;
+    color.blue = rgba.blue * 65535;
+#else
     gdk_colormap_query_color(gtk_widget_get_colormap(gui.drawarea),
 			     (unsigned long)pixel, &color);
+#endif
 
     return (((unsigned)color.red   & 0xff00) << 8)
 	 |  ((unsigned)color.green & 0xff00)
@@ -5843,7 +7011,11 @@ gui_mch_get_rgb(guicolor_T pixel)
     void
 gui_mch_getmouse(int *x, int *y)
 {
+#ifdef GSEAL_ENABLE
+    gdk_window_get_pointer(gtk_widget_get_window(gui.drawarea), x, y, NULL);
+#else
     gdk_window_get_pointer(gui.drawarea->window, x, y, NULL);
+#endif
 }
 
     void
@@ -5852,9 +7024,21 @@ gui_mch_setmouse(int x, int y)
     /* Sorry for the Xlib call, but we can't avoid it, since there is no
      * internal GDK mechanism present to accomplish this.  (and for good
      * reason...) */
+#ifdef GSEAL_ENABLE
+#ifdef USE_GTK3
+    XWarpPointer(GDK_WINDOW_XDISPLAY(gtk_widget_get_window(gui.drawarea)),
+		 (Window)0, GDK_WINDOW_XID(gtk_widget_get_window(gui.drawarea)),
+		 0, 0, 0U, 0U, x, y);
+#else
+    XWarpPointer(GDK_WINDOW_XDISPLAY(gtk_widget_get_window(gui.drawarea)),
+		 (Window)0, GDK_WINDOW_XWINDOW(gtk_widget_get_window(gui.drawarea)),
+		 0, 0, 0U, 0U, x, y);
+#endif
+#else
     XWarpPointer(GDK_WINDOW_XDISPLAY(gui.drawarea->window),
 		 (Window)0, GDK_WINDOW_XWINDOW(gui.drawarea->window),
 		 0, 0, 0U, 0U, x, y);
+#endif
 }
 
 
@@ -5875,10 +7059,18 @@ gui_mch_mousehide(int hide)
     if (gui.pointer_hidden != hide)
     {
 	gui.pointer_hidden = hide;
+#ifdef GSEAL_ENABLE
+	if (gtk_widget_get_window(gui.drawarea) && gui.blank_pointer != NULL)
+#else
 	if (gui.drawarea->window && gui.blank_pointer != NULL)
+#endif
 	{
 	    if (hide)
+#ifdef GSEAL_ENABLE
+		gdk_window_set_cursor(gtk_widget_get_window(gui.drawarea), gui.blank_pointer);
+#else
 		gdk_window_set_cursor(gui.drawarea->window, gui.blank_pointer);
+#endif
 	    else
 #ifdef FEAT_MOUSESHAPE
 		mch_set_mouse_shape(last_shape);
@@ -5920,11 +7112,19 @@ mch_set_mouse_shape(int shape)
     int		   id;
     GdkCursor	   *c;
 
+#ifdef GSEAL_ENABLE
+    if (gtk_widget_get_window(gui.drawarea) == NULL)
+#else
     if (gui.drawarea->window == NULL)
+#endif
 	return;
 
     if (shape == MSHAPE_HIDE || gui.pointer_hidden)
+#ifdef GSEAL_ENABLE
+	gdk_window_set_cursor(gtk_widget_get_window(gui.drawarea), gui.blank_pointer);
+#else
 	gdk_window_set_cursor(gui.drawarea->window, gui.blank_pointer);
+#endif
     else
     {
 	if (shape >= MSHAPE_NUMBERED)
@@ -5945,8 +7145,16 @@ mch_set_mouse_shape(int shape)
 # else
 	c = gdk_cursor_new((GdkCursorType)id);
 # endif
+#ifdef GSEAL_ENABLE
+	gdk_window_set_cursor(gtk_widget_get_window(gui.drawarea), c);
+#else
 	gdk_window_set_cursor(gui.drawarea->window, c);
+#endif
+#ifdef GDK_DISABLE_DEPRECATED
+        gdk_cursor_unref(c);
+#else
 	gdk_cursor_destroy(c); /* Unref, actually.  Bloody GTK+ 1. */
+#endif
     }
     if (shape != MSHAPE_HIDE)
 	last_shape = shape;
@@ -5973,7 +7181,12 @@ gui_mch_drawsign(int row, int col, int typenr)
 
     sign = (GdkPixbuf *)sign_get_image(typenr);
 
+#ifdef GSEAL_ENABLE
+    if (sign != NULL && gui.drawarea != NULL &&
+        gtk_widget_get_window(gui.drawarea) != NULL)
+#else
     if (sign != NULL && gui.drawarea != NULL && gui.drawarea->window != NULL)
+#endif
     {
 	int width;
 	int height;
@@ -6037,6 +7250,44 @@ gui_mch_drawsign(int row, int col, int typenr)
 	xoffset = (width  - SIGN_WIDTH)  / 2;
 	yoffset = (height - SIGN_HEIGHT) / 2;
 
+#ifdef GDK_DISABLE_DEPRECATED
+        {
+            cairo_t         *cr;
+            cairo_surface_t *bg_surf;
+            cairo_t         *bg_cr;
+            cairo_surface_t *sign_surf;
+            cairo_t         *sign_cr;
+
+            cr = gdk_cairo_create(gtk_widget_get_window(gui.drawarea));
+
+            bg_surf = cairo_surface_create_similar(cairo_get_target(cr),
+                                                   CAIRO_CONTENT_COLOR,
+                                                   SIGN_WIDTH, SIGN_HEIGHT);
+            bg_cr = cairo_create(bg_surf);
+            set_cairo_source_rgb_from_pixel(bg_cr, gui.bgcolor->pixel);
+            cairo_paint(bg_cr);
+
+            sign_surf = cairo_surface_create_similar(cairo_get_target(cr),
+                                                     CAIRO_CONTENT_COLOR,
+                                                     SIGN_WIDTH, SIGN_HEIGHT);
+            sign_cr = cairo_create(sign_surf);
+            gdk_cairo_set_source_pixbuf(sign_cr, sign, -xoffset, -yoffset);
+            cairo_paint(sign_cr);
+
+            cairo_set_operator(sign_cr, CAIRO_OPERATOR_DEST_OVER);
+            cairo_set_source_surface(sign_cr, bg_surf, 0, 0);
+            cairo_paint(sign_cr);
+
+            cairo_set_source_surface(cr, sign_surf, FILL_X(col), FILL_Y(row));
+            cairo_paint(cr);
+
+            cairo_destroy(sign_cr);
+            cairo_surface_destroy(sign_surf);
+            cairo_destroy(bg_cr);
+            cairo_surface_destroy(bg_surf);
+            cairo_destroy(cr);
+        }
+#else
 	gdk_gc_set_foreground(gui.text_gc, gui.bgcolor);
 
 	gdk_draw_rectangle(gui.drawarea->window,
@@ -6059,6 +7310,7 @@ gui_mch_drawsign(int row, int col, int typenr)
 					    127,
 					    GDK_RGB_DITHER_NORMAL,
 					    0, 0);
+#endif
 	if (need_scale)
 	    g_object_unref(sign);
     }

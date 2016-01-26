@@ -875,7 +875,11 @@ static void remove_timer(void);
     static void CALLBACK
 timer_proc(HWND hwnd UNUSED, UINT uMsg UNUSED, UINT idEvent UNUSED, DWORD dwTime UNUSED)
 # elif defined(FEAT_GUI_GTK)
+#  ifdef GTK_DISABLE_DEPRECATED
+    static gboolean
+#else
     static gint
+#endif
 timer_proc(gpointer data UNUSED)
 # elif defined(FEAT_GUI_MOTIF) || defined(FEAT_GUI_ATHENA)
     static void
@@ -902,7 +906,11 @@ setup_timer(void)
 # if defined(FEAT_GUI_W32)
     timer_id = SetTimer(NULL, 0, p_mzq, timer_proc);
 # elif defined(FEAT_GUI_GTK)
+#  ifdef GTK_DISABLE_DEPRECATED
+    timer_id = g_timeout_add((guint)p_mzq, (GSourceFunc)timer_proc, NULL);
+#  else
     timer_id = gtk_timeout_add((guint32)p_mzq, (GtkFunction)timer_proc, NULL);
+#  endif
 # elif defined(FEAT_GUI_MOTIF) || defined(FEAT_GUI_ATHENA)
     timer_id = XtAppAddTimeOut(app_context, p_mzq, timer_proc, NULL);
 # elif defined(FEAT_GUI_MAC)
@@ -918,7 +926,11 @@ remove_timer(void)
 # if defined(FEAT_GUI_W32)
     KillTimer(NULL, timer_id);
 # elif defined(FEAT_GUI_GTK)
+   #ifdef GTK_DISABLE_DEPRECATED
+    g_source_remove(timer_id);
+   #else
     gtk_timeout_remove(timer_id);
+   #endif
 # elif defined(FEAT_GUI_MOTIF) || defined(FEAT_GUI_ATHENA)
     XtRemoveTimeOut(timer_id);
 # elif defined(FEAT_GUI_MAC)
