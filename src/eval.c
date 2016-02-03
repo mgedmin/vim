@@ -12982,8 +12982,13 @@ f_has(typval_T *argvars, typval_T *rettv)
 # endif
 #endif
 #ifdef FEAT_GUI_GTK
+# ifdef USE_GTK3
+	"gui_gtk",
+        "gui_gtk3",
+# else
 	"gui_gtk",
 	"gui_gtk2",
+# endif
 #endif
 #ifdef FEAT_GUI_GNOME
 	"gui_gnome",

@@ -186,6 +186,18 @@ messageFromNetbeans(XtPointer clientData,
 #endif
 
 #ifdef FEAT_GUI_GTK
+# if GTK_CHECK_VERSION(3,0,0)
+    static gboolean
+messageFromNetbeans(GIOChannel *unused1 UNUSED,
+                    GIOCondition unused2 UNUSED,
+                    gpointer clientData UNUSED)
+{
+    channel_read(GPOINTER_TO_INT(clientData));
+    return TRUE; /* assumes the event source isn't removed after this
+                  * function returns.
+                  */
+}
+# else
     static void
 messageFromNetbeans(gpointer clientData,
 		    gint unused1 UNUSED,
@@ -193,6 +205,7 @@ messageFromNetbeans(gpointer clientData,
 {
     channel_read((int)(long)clientData);
 }
+# endif
 #endif
 
     static void
@@ -219,10 +232,22 @@ channel_gui_register(int idx)
      * is input on the editor connection socket
      */
     if (channel->ch_inputHandler == 0)
+#   if GTK_CHECK_VERSION(3,0,0)
+    {
+        GIOChannel *chnnl = g_io_channel_unix_new(channel->ch_fd);
+        channel->ch_inputHandler
+            = g_io_add_watch(chnnl,
+                                G_IO_IN|G_IO_HUP|G_IO_ERR|G_IO_PRI,
+                                    messageFromNetbeans,
+                                        GINT_TO_POINTER(idx));
+        g_io_channel_unref(chnnl);
+    }
+#   else
 	channel->ch_inputHandler =
 	    gdk_input_add((gint)channel->ch_fd, (GdkInputCondition)
 			     ((int)GDK_INPUT_READ + (int)GDK_INPUT_EXCEPTION),
 				    messageFromNetbeans, (gpointer)(long)idx);
+#   endif
 #  else
 #   ifdef FEAT_GUI_W32
     /*
@@ -266,7 +291,11 @@ channel_gui_unregister(int idx)
 #  ifdef FEAT_GUI_GTK
     if (channel->ch_inputHandler != 0)
     {
+#   if GTK_CHECK_VERSION(3,0,0)
+        g_source_remove(channel->ch_inputHandler);
+#   else
 	gdk_input_remove(channel->ch_inputHandler);
+#   endif
 	channel->ch_inputHandler = 0;
     }
 #  else
